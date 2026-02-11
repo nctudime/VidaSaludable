@@ -87,11 +87,12 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
-
-flutter_icons:
+flutter_launcher_icons:
   android: true
   ios: true
-  image_path: assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png
-  adaptive_icon_background: "#AEEA00"
-  adaptive_icon_foreground: assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png
+  image_path: "assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png"   # para iOS y Android legacy (pre-adaptive)
+  
+  adaptive_icon_background: "#AEEA00"                                 # color de fondo sólido
+  adaptive_icon_foreground: "assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png"
+  
   min_sdk_android: 21
