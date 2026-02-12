@@ -47,9 +47,9 @@ class _SplashScreenState extends State<SplashScreen>
     _fade = CurvedAnimation(parent: _controller, curve: Curves.easeIn);
     Future.delayed(const Duration(milliseconds: 2200), () {
       if (mounted) {
-        Navigator.of(
-          context,
-        ).pushReplacement(MaterialPageRoute(builder: (_) => const HomeTabs()));
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const PresentationScreen()),
+        );
       }
     });
   }
@@ -86,6 +86,108 @@ class _SplashScreenState extends State<SplashScreen>
               child: ScaleTransition(
                 scale: _scale,
                 child: const _LogoVidaSaludable(),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class PresentationScreen extends StatelessWidget {
+  const PresentationScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xFFCCFF90),
+                  Color(0xFFAEEA00),
+                  Color(0xFF7CB342),
+                ],
+                stops: [0.0, 0.5, 1.0],
+              ),
+            ),
+          ),
+          SafeArea(
+            child: Center(
+              child: SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 16,
+                    ),
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F5E9),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: const Color(0xFF004D40).withValues(alpha: 0.7),
+                        width: 1.2,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(
+                            0xFF00332A,
+                          ).withValues(alpha: 0.35),
+                          blurRadius: 20,
+                          spreadRadius: 1,
+                          offset: const Offset(6, 8),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        const _LogoVidaSaludable(),
+                        const SizedBox(height: 24),
+                        SizedBox(
+                          height: 48,
+                          child: FilledButton(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF004D40),
+                              foregroundColor: Colors.white,
+                            ),
+                            onPressed: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      const HomeTabs(initialIndex: 0),
+                                ),
+                              );
+                            },
+                            child: const Text('Iniciar sesión'),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          height: 48,
+                          child: OutlinedButton(
+                            onPressed: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) =>
+                                      const HomeTabs(initialIndex: 1),
+                                ),
+                              );
+                            },
+                            child: const Text('Registrarse gratis'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -154,13 +256,20 @@ class _LogoVidaSaludable extends StatelessWidget {
 }
 
 class HomeTabs extends StatefulWidget {
-  const HomeTabs({super.key});
+  final int initialIndex;
+  const HomeTabs({super.key, this.initialIndex = 0});
   @override
   State<HomeTabs> createState() => _HomeTabsState();
 }
 
 class _HomeTabsState extends State<HomeTabs> {
-  int index = 0;
+  late int index;
+  @override
+  void initState() {
+    super.initState();
+    index = widget.initialIndex;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
