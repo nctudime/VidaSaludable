@@ -110,15 +110,15 @@ class _LogoVidaSaludable extends StatelessWidget {
             shape: BoxShape.circle,
             gradient: LinearGradient(
               colors: [
-                base.primary.withOpacity(0.2),
-                base.secondary.withOpacity(0.25),
+                base.primary.withValues(alpha: 0.2),
+                base.secondary.withValues(alpha: 0.25),
               ],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.08),
+                color: Colors.black.withValues(alpha: 0.08),
                 blurRadius: 18,
                 spreadRadius: 4,
               ),
@@ -183,7 +183,7 @@ class _HomeTabsState extends State<HomeTabs> {
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.08),
+                      color: Colors.black.withValues(alpha: 0.08),
                       blurRadius: 16,
                       spreadRadius: 2,
                       offset: const Offset(0, 4),
@@ -448,10 +448,13 @@ class _RegisterTabState extends State<RegisterTab> {
                           border: OutlineInputBorder(),
                         ),
                         validator: (v) {
-                          if (v == null || v.trim().isEmpty)
+                          if (v == null || v.trim().isEmpty) {
                             return 'Ingresa tu edad';
+                          }
                           final n = int.tryParse(v);
-                          if (n == null || n <= 0) return 'Edad inválida';
+                          if (n == null || n <= 0) {
+                            return 'Edad inválida';
+                          }
                           return null;
                         },
                       ),
@@ -459,7 +462,7 @@ class _RegisterTabState extends State<RegisterTab> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: DropdownButtonFormField<String>(
-                        value: _gender,
+                        initialValue: _gender,
                         decoration: const InputDecoration(
                           labelText: 'Género',
                           border: OutlineInputBorder(),
