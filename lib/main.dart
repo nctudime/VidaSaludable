@@ -1131,77 +1131,639 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final vspace = size.height / 50;
+    final isDark = _brightness == Brightness.dark;
+    final background = isDark
+        ? (Colors.grey[900] ?? const Color(0xFF121212))
+        : Colors.white;
+    final titleColor = isDark ? Colors.white : const Color(0xFF1F1F1F);
+    final subtitleColor = isDark ? Colors.white70 : const Color(0xFF616161);
+    final sectionTitleStyle = TextStyle(
+      fontSize: 22,
+      fontWeight: FontWeight.w800,
+      color: titleColor,
+    );
+    BoxDecoration gradientCardDecoration() => BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          _seed.withAlpha(isDark ? 28 : 36),
+          _seed.withAlpha(isDark ? 14 : 20),
+        ],
+      ),
+      borderRadius: BorderRadius.circular(20),
+    );
     return Scaffold(
-      appBar: AppBar(title: const Text('Ajustes')),
+      backgroundColor: background,
+      appBar: AppBar(
+        backgroundColor: _seed.withAlpha(200),
+        elevation: 2,
+        foregroundColor: Colors.white,
+        title: const Text('Ajustes'),
+      ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         children: [
-          const Text('Tema', style: TextStyle(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
-          DropdownButton<Brightness>(
-            value: _brightness,
-            isExpanded: true,
-            items: const [
-              DropdownMenuItem(value: Brightness.light, child: Text('Claro')),
-              DropdownMenuItem(value: Brightness.dark, child: Text('Oscuro')),
+          Row(
+            children: [
+              Icon(Icons.settings, color: _seed),
+              const SizedBox(width: 8),
+              Text('General', style: sectionTitleStyle),
             ],
-            onChanged: (b) =>
-                setState(() => _brightness = b ?? Brightness.light),
           ),
-          const SizedBox(height: 16),
-          const Text(
-            'Paleta de colores',
-            style: TextStyle(fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _palette.map((e) {
-              final selected = _seed == e.value;
-              return ChoiceChip(
-                label: Text(e.key),
-                selected: selected,
-                onSelected: (_) => setState(() => _seed = e.value),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 16),
-          const Text('Fuente', style: TextStyle(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
-          DropdownButton<String?>(
-            value: _fontFamily,
-            isExpanded: true,
-            hint: const Text('Sistema (por defecto)'),
-            items: const [
-              DropdownMenuItem<String?>(value: null, child: Text('Sistema')),
-              DropdownMenuItem<String?>(value: 'serif', child: Text('Serif')),
-              DropdownMenuItem<String?>(
-                value: 'monospace',
-                child: Text('Monospace'),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: gradientCardDecoration(),
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: Icon(Icons.language, color: _seed),
+                      title: Text(
+                        'Idioma',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: titleColor,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Selecciona tu idioma preferido',
+                        style: TextStyle(fontSize: 14, color: subtitleColor),
+                      ),
+                      trailing: DropdownButton<String>(
+                        value: 'Español',
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Español',
+                            child: Text('Español'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'English',
+                            child: Text('English'),
+                          ),
+                        ],
+                        onChanged: (_) {},
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      title: Text(
+                        'Modo offline',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      subtitle: Text(
+                        'Usar datos locales cuando no haya conexión',
+                        style: TextStyle(fontSize: 14, color: subtitleColor),
+                      ),
+                      value: false,
+                      onChanged: (_) {},
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(Icons.volume_up, color: _seed),
+                      title: Text(
+                        'Volumen de notificaciones',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: titleColor,
+                        ),
+                      ),
+                      subtitle: Slider(
+                        value: 0.5,
+                        onChanged: (_) {},
+                        min: 0,
+                        max: 1,
+                      ),
+                    ),
+                  ],
+                ),
               ),
+            ),
+          ),
+          SizedBox(height: vspace),
+          Row(
+            children: [
+              Icon(Icons.palette, color: _seed),
+              const SizedBox(width: 8),
+              Text('Apariencia', style: sectionTitleStyle),
             ],
-            onChanged: (v) => setState(() => _fontFamily = v),
           ),
-          const SizedBox(height: 16),
-          SwitchListTile(
-            title: const Text('Seguir ubicación'),
-            value: _followLocation,
-            onChanged: (v) => setState(() => _followLocation = v),
-            subtitle: const Text('Permitir que la app use tu ubicación'),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: gradientCardDecoration(),
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Modo tema',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: titleColor,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SegmentedButton<Brightness>(
+                      segments: const [
+                        ButtonSegment(
+                          value: Brightness.light,
+                          label: Text('Claro'),
+                          icon: Icon(Icons.wb_sunny_rounded),
+                        ),
+                        ButtonSegment(
+                          value: Brightness.dark,
+                          label: Text('Oscuro'),
+                          icon: Icon(Icons.nightlight_round),
+                        ),
+                      ],
+                      selected: {_brightness},
+                      onSelectionChanged: (s) =>
+                          setState(() => _brightness = s.first),
+                    ),
+                    SizedBox(height: vspace),
+                    Text(
+                      'Paleta de colores',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: titleColor,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Center(
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 300),
+                        width: 80,
+                        height: 80,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [_seed, _seed.withAlpha(160)],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    GridView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            childAspectRatio: 1,
+                            mainAxisSpacing: 12,
+                            crossAxisSpacing: 12,
+                          ),
+                      itemCount: _palette.length,
+                      itemBuilder: (context, index) {
+                        final e = _palette[index];
+                        final selected = _seed == e.value;
+                        return GestureDetector(
+                          onTap: () => setState(() => _seed = e.value),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 50,
+                                height: 50,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: e.value,
+                                  border: Border.all(
+                                    color: selected
+                                        ? _seed
+                                        : Colors.transparent,
+                                    width: selected ? 3 : 0,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                e.key,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: titleColor,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
-          const SizedBox(height: 24),
+          SizedBox(height: vspace),
+          Row(
+            children: [
+              Icon(Icons.person, color: _seed),
+              const SizedBox(width: 8),
+              Text('Cuenta', style: sectionTitleStyle),
+            ],
+          ),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: gradientCardDecoration(),
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: Icon(
+                        Icons.account_circle_outlined,
+                        color: _seed,
+                      ),
+                      title: Text(
+                        'Nombre: Javier',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      subtitle: Text(
+                        'Editar perfil',
+                        style: TextStyle(fontSize: 14, color: subtitleColor),
+                      ),
+                      trailing: const Icon(Icons.edit),
+                      onTap: () {},
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(Icons.email_outlined, color: _seed),
+                      title: Text(
+                        'Correo: ejemplo@vidasaludable.com',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      trailing: const Icon(Icons.email),
+                      onTap: () {},
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(Icons.lock_outline, color: _seed),
+                      title: Text(
+                        'Cambiar contraseña',
+                        style: TextStyle(color: subtitleColor),
+                      ),
+                      trailing: const Icon(Icons.lock),
+                      onTap: () {},
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(
+                        Icons.logout,
+                        color: Colors.redAccent,
+                      ),
+                      title: const Text(
+                        'Cerrar sesión',
+                        style: TextStyle(
+                          color: Colors.redAccent,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      trailing: const Icon(
+                        Icons.chevron_right,
+                        color: Colors.redAccent,
+                      ),
+                      onTap: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          SizedBox(height: vspace),
+          Row(
+            children: [
+              Icon(Icons.security, color: _seed),
+              const SizedBox(width: 8),
+              Text('Privacidad y seguridad', style: sectionTitleStyle),
+            ],
+          ),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: gradientCardDecoration(),
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      title: Text(
+                        'Seguir ubicación',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      subtitle: Text(
+                        'Permite acceso a GPS para funciones locales',
+                        style: TextStyle(fontSize: 14, color: subtitleColor),
+                      ),
+                      value: _followLocation,
+                      onChanged: (v) => setState(() => _followLocation = v),
+                    ),
+                    SwitchListTile(
+                      title: Text(
+                        'Compartir datos anónimos',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      value: false,
+                      onChanged: (_) {},
+                    ),
+                    ListTile(
+                      leading: Icon(Icons.shield_moon_outlined, color: _seed),
+                      title: Text(
+                        'Gestionar permisos',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      subtitle: Text(
+                        'Cámara, micrófono, etc.',
+                        style: TextStyle(fontSize: 14, color: subtitleColor),
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          SizedBox(height: vspace),
+          Row(
+            children: [
+              Icon(Icons.notifications, color: _seed),
+              const SizedBox(width: 8),
+              Text('Notificaciones', style: sectionTitleStyle),
+            ],
+          ),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: gradientCardDecoration(),
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      title: Text(
+                        'Activar push',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      value: true,
+                      onChanged: (_) {},
+                    ),
+                    SwitchListTile(
+                      title: Text(
+                        'Recordatorios diarios',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      value: false,
+                      onChanged: (_) {},
+                    ),
+                    SwitchListTile(
+                      title: Text(
+                        'Alertas de salud',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      subtitle: Text(
+                        'Personalizadas por ubicación',
+                        style: TextStyle(fontSize: 14, color: subtitleColor),
+                      ),
+                      value: true,
+                      onChanged: (_) {},
+                    ),
+                    ListTile(
+                      leading: Icon(Icons.schedule, color: _seed),
+                      title: Text(
+                        'Frecuencia de notificaciones',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: titleColor,
+                        ),
+                      ),
+                      subtitle: Slider(
+                        value: 50,
+                        min: 0,
+                        max: 100,
+                        onChanged: (_) {},
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          SizedBox(height: vspace),
+          Row(
+            children: [
+              Icon(Icons.text_fields, color: _seed),
+              const SizedBox(width: 8),
+              Text('Tipografía y accesibilidad', style: sectionTitleStyle),
+            ],
+          ),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: gradientCardDecoration(),
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Fuente',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: titleColor,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(
+                          value: 'system',
+                          label: Text('Sistema'),
+                          icon: Icon(Icons.phone_android),
+                        ),
+                        ButtonSegment(
+                          value: 'custom',
+                          label: Text('Personalizada'),
+                          icon: Icon(Icons.text_fields),
+                        ),
+                      ],
+                      selected: {_fontFamily == null ? 'system' : 'custom'},
+                      onSelectionChanged: (s) {
+                        final choice = s.first;
+                        setState(
+                          () =>
+                              _fontFamily = choice == 'system' ? null : 'serif',
+                        );
+                      },
+                    ),
+                    SizedBox(height: vspace),
+                    Text(
+                      'Tamaño de texto',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: titleColor,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Slider(value: 1.0, min: 0.8, max: 1.5, onChanged: (_) {}),
+                    SwitchListTile(
+                      title: Text(
+                        'Modo alto contraste',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      value: isDark,
+                      onChanged: (_) {},
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          SizedBox(height: vspace),
+          Row(
+            children: [
+              Icon(Icons.info_outline, color: _seed),
+              const SizedBox(width: 8),
+              Text('Acerca de', style: sectionTitleStyle),
+            ],
+          ),
+          Card(
+            margin: const EdgeInsets.symmetric(vertical: 10),
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                decoration: gradientCardDecoration(),
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: Icon(Icons.info, color: _seed),
+                      title: Text(
+                        'Versión: 1.2.0',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      subtitle: Text(
+                        'Última actualización: 2024',
+                        style: TextStyle(fontSize: 14, color: subtitleColor),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(Icons.privacy_tip_outlined, color: _seed),
+                      title: Text(
+                        'Política de privacidad',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {},
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(Icons.article_outlined, color: _seed),
+                      title: Text(
+                        'Términos de uso',
+                        style: TextStyle(color: titleColor),
+                      ),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {},
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(Icons.mail_outline, color: _seed),
+                      title: Text(
+                        'Contacto: support@vidasaludable.com',
+                        style: TextStyle(color: titleColor),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          SizedBox(height: vspace),
           Row(
             children: [
               Expanded(
                 child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: subtitleColor,
+                    side: BorderSide(
+                      color: isDark ? Colors.white24 : const Color(0xFFBDBDBD),
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
                   onPressed: () => Navigator.of(context).pop(),
                   child: const Text('Cancelar'),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: FilledButton(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _seed,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    elevation: 4,
+                  ),
                   onPressed: () {
                     Navigator.of(context).pop(
                       SettingsData(
