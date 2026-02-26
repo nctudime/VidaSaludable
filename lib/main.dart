@@ -1,9 +1,18 @@
 import 'dart:io';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:ui' as ui show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:sensors_plus/sensors_plus.dart';
+// Reemplazado activity_recognition_flutter por geolocator + sensors_plus (AGP 8+)
+import 'package:google_generative_ai/google_generative_ai.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,13 +26,13 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Vida Saludable',
+      title: 'Vitu',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.lime),
         useMaterial3: true,
       ),
-      home: const VidaPlusApp(),
+      home: const SplashScreen(),
     );
   }
 }
@@ -156,6 +165,122 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   File? _photo;
   bool _saving = false;
+  // Gemini es autónomo: solo necesita internet, no BD ni servidor propio
+  late GenerativeModel _geminiModel; // ¡Cambia la API key en initState!
+  bool _analyzing = false;
+  String? _plato;
+  int? _kcal;
+  double? _prot;
+  double? _carb;
+  double? _fat;
+
+  bool get _hasNutrients =>
+      _prot != null &&
+      _carb != null &&
+      _fat != null &&
+      (_prot! + _carb! + _fat!) > 0;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Clave API real – NUNCA la subas a GitHub. Usa .env o constante segura en producción.
+    // Genera nueva en https://aistudio.google.com/app/apikey si esta falla.
+    const apiKey = 'AIzaSyD8IL51lskViMD7NxcHYGnNvOChFMJfSVg';
+
+    // Inicializa el modelo de Gemini
+    _geminiModel = GenerativeModel(
+      model: 'gemini-1.5-flash', // v1
+      apiKey: apiKey,
+    );
+
+    // Verificación inicial de conectividad con Gemini (ping)
+    Future.microtask(() async {
+      try {
+        final ct = await _geminiModel.countTokens([Content.text('test')]);
+        debugPrint('Gemini ping OK: ${ct.totalTokens} tokens');
+      } on GenerativeAIException catch (e, st) {
+        debugPrint('Gemini ping failed: ${e.message}');
+        debugPrint('Stack trace: $st');
+        // Fallback para errores de modelo/versión (v1beta o modelo no encontrado)
+        final msg = e.message.toLowerCase(); // Quitado '??' innecesario
+        final looksLikeV1Beta =
+            msg.contains('v1beta') ||
+            msg.contains('not found') ||
+            msg.contains('not supported') ||
+            msg.contains('model');
+        if (looksLikeV1Beta) {
+          try {
+            // Intento 1: usar alias latest de flash
+            _geminiModel = GenerativeModel(
+              model: 'gemini-1.5-flash-latest',
+              apiKey: apiKey,
+            );
+            final ct2 = await _geminiModel.countTokens([Content.text('test')]);
+            debugPrint(
+              'Fallback gemini-1.5-flash-latest OK: ${ct2.totalTokens} tokens',
+            );
+            if (mounted) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'API antigua detectada: usando gemini-1.5-flash-latest',
+                    ),
+                  ),
+                );
+              });
+            }
+          } on Exception catch (e2, st2) {
+            debugPrint('Fallback flash-latest falló: $e2');
+            debugPrint('Stack trace: $st2');
+            try {
+              // Intento 2: gemini-pro (texto)
+              _geminiModel = GenerativeModel(
+                model: 'gemini-pro',
+                apiKey: apiKey,
+              );
+              final ct3 = await _geminiModel.countTokens([
+                Content.text('test'),
+              ]);
+              debugPrint('Fallback gemini-pro OK: ${ct3.totalTokens} tokens');
+              if (mounted) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'API antigua detectada: usando gemini-pro como fallback',
+                      ),
+                    ),
+                  );
+                });
+              }
+            } on Exception catch (e3, st3) {
+              debugPrint('Fallback gemini-pro falló: $e3');
+              debugPrint('Stack trace: $st3');
+              if (mounted) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'API versión antigua detectada – actualiza paquete o clave',
+                      ),
+                    ),
+                  );
+                });
+              }
+            }
+          }
+        }
+      } on SocketException catch (e, st) {
+        debugPrint('Sin internet (ping): $e');
+        debugPrint('Stack trace: $st');
+      } catch (e, st) {
+        debugPrint('Ping error: $e');
+        debugPrint('Stack trace: $st');
+      }
+    });
+  }
 
   Future<void> _takePhoto() async {
     final ImagePicker picker = ImagePicker();
@@ -172,8 +297,181 @@ class _HomeScreenState extends State<HomeScreen> {
       final file = File(path);
       await file.writeAsBytes(await xfile.readAsBytes());
       setState(() => _photo = file);
+      setState(() => _analyzing = true);
+      await _analizarConGemini(file);
     } finally {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _analyzing = false;
+        });
+      }
+    }
+  }
+
+  void _showSnack(String msg, {bool error = false, VoidCallback? onRetry}) {
+    final snack = SnackBar(
+      content: Text(msg),
+      backgroundColor: error ? Colors.red.shade700 : null,
+      action: onRetry != null
+          ? SnackBarAction(
+              label: 'Reintentar',
+              textColor: Colors.white,
+              onPressed: onRetry,
+            )
+          : null,
+    );
+    ScaffoldMessenger.of(context).showSnackBar(snack);
+  }
+
+  Future<void> _analizarConGemini(File foto) async {
+    try {
+      final length = await foto.length();
+      debugPrint('Foto path: ${foto.path}');
+      // Quitadas llaves innecesarias en la interpolación
+      debugPrint('Foto size: $length bytes');
+      debugPrint('Enviando foto: ${foto.path}, tamaño: $length bytes');
+      if (length == 0) {
+        _showSnack(
+          'Imagen vacía o no legible',
+          error: true,
+          onRetry: () {
+            if (_photo != null) _analizarConGemini(_photo!);
+          },
+        );
+        return;
+      }
+      const prompt = '''
+Analiza esta comida en la foto.
+Identifica el plato principal aproximado.
+Estima valores nutricionales aproximados.
+Responde SOLO en este formato exacto, sin texto adicional:
+Plato: [nombre aproximado]
+Calorías: [número] kcal
+Proteínas: [número] g
+Carbohidratos: [número] g
+Grasas: [número] g
+''';
+      final bytes = await foto.readAsBytes();
+      final lower = foto.path.toLowerCase();
+      final mime = lower.endsWith('.png') ? 'image/png' : 'image/jpeg';
+      final content = Content.multi([TextPart(prompt), DataPart(mime, bytes)]);
+      // Nota: Si >2MB, considera comprimir con paquete "image" (opcional)
+      final resp = await _geminiModel
+          .generateContent([content])
+          .timeout(const Duration(seconds: 20));
+      final text = resp.text ?? '';
+      debugPrint('Gemini raw response:\n$text');
+      if (text.isEmpty) {
+        if (mounted) {
+          _showSnack(
+            'Gemini no devolvió respuesta',
+            error: true,
+            onRetry: () {
+              if (_photo != null) _analizarConGemini(_photo!);
+            },
+          );
+        }
+        return;
+      }
+      final platoRx = RegExp(
+        r'^Plato:\s*(.+)$',
+        multiLine: true,
+        caseSensitive: false,
+      );
+      final kcalRx = RegExp(
+        r'^Calor[ií]as:\s*(\d+)\s*kcal',
+        multiLine: true,
+        caseSensitive: false,
+      );
+      final protRx = RegExp(
+        r'^Prote[ií]nas:\s*([\d\.]+)\s*g',
+        multiLine: true,
+        caseSensitive: false,
+      );
+      final carbRx = RegExp(
+        r'^Carbohidratos:\s*([\d\.]+)\s*g',
+        multiLine: true,
+        caseSensitive: false,
+      );
+      final fatRx = RegExp(
+        r'^Grasas:\s*([\d\.]+)\s*g',
+        multiLine: true,
+        caseSensitive: false,
+      );
+
+      final p = platoRx.firstMatch(text)?.group(1)?.trim();
+      final kcal = int.tryParse(kcalRx.firstMatch(text)?.group(1) ?? '');
+      final pr = double.tryParse(protRx.firstMatch(text)?.group(1) ?? '');
+      final cb = double.tryParse(carbRx.firstMatch(text)?.group(1) ?? '');
+      final gr = double.tryParse(fatRx.firstMatch(text)?.group(1) ?? '');
+
+      if (p == null || kcal == null || pr == null || cb == null || gr == null) {
+        if (mounted) {
+          _showSnack(
+            'No se pudo estimar nutrientes',
+            error: true,
+            onRetry: () {
+              if (_photo != null) _analizarConGemini(_photo!);
+            },
+          );
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _plato = p ?? 'No se pudo detectar';
+          _kcal = kcal ?? 0;
+          _prot = pr ?? 0;
+          _carb = cb ?? 0;
+          _fat = gr ?? 0;
+        });
+      }
+    } on GenerativeAIException catch (e) {
+      if (mounted) {
+        final msg = e.message;
+        debugPrint('GenerativeAIException: $msg');
+        _showSnack(
+          'Error de IA: $msg',
+          error: true,
+          onRetry: () {
+            if (_photo != null) _analizarConGemini(_photo!);
+          },
+        );
+      }
+    } on SocketException catch (e) {
+      debugPrint('SocketException: $e');
+      if (mounted) {
+        _showSnack(
+          'No hay internet',
+          error: true,
+          onRetry: () {
+            if (_photo != null) _analizarConGemini(_photo!);
+          },
+        );
+      }
+    } on TimeoutException {
+      debugPrint('TimeoutException durante generateContent');
+      if (mounted) {
+        _showSnack(
+          'Tiempo de espera agotado',
+          error: true,
+          onRetry: () {
+            if (_photo != null) _analizarConGemini(_photo!);
+          },
+        );
+      }
+    } catch (e, st) {
+      debugPrint('Error inesperado: $e');
+      debugPrint('$st');
+      if (mounted) {
+        _showSnack(
+          'Error inesperado: $e',
+          error: true,
+          onRetry: () {
+            if (_photo != null) _analizarConGemini(_photo!);
+          },
+        );
+      }
     }
   }
 
@@ -231,7 +529,7 @@ class _HomeScreenState extends State<HomeScreen> {
         duration: const Duration(milliseconds: 350),
         child: ListView(
           key: ValueKey(
-            '${widget.brightness}_${widget.seedColor.value}_${_photo?.path ?? ''}',
+            '${widget.brightness}_${widget.seedColor.toARGB32()}_${_photo?.path ?? ''}',
           ),
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
           children: [
@@ -247,27 +545,73 @@ class _HomeScreenState extends State<HomeScreen> {
                   SizedBox(height: vspace),
                   AspectRatio(
                     aspectRatio: 16 / 9,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: Container(
-                        color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
-                        child: _photo != null
-                            ? Image.file(_photo!, fit: BoxFit.cover)
-                            : Center(
-                                child: Icon(
-                                  Icons.food_bank,
-                                  size: 64,
-                                  color: widget.seedColor,
+                    child: Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: Container(
+                            color: isDark
+                                ? const Color(0xFF1E1E1E)
+                                : Colors.white,
+                            child: _photo != null
+                                ? Image.file(_photo!, fit: BoxFit.cover)
+                                : Center(
+                                    child: Icon(
+                                      Icons.camera_alt,
+                                      size: 80,
+                                      color: widget.seedColor,
+                                    ),
+                                  ),
+                          ),
+                        ),
+                        if (_analyzing)
+                          AnimatedOpacity(
+                            opacity: _analyzing ? 1 : 0,
+                            duration: const Duration(milliseconds: 200),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(16),
+                              child: BackdropFilter(
+                                filter: ui.ImageFilter.blur(
+                                  sigmaX: 3,
+                                  sigmaY: 3,
+                                ),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.40),
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                  child: Center(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        CircularProgressIndicator(
+                                          color: widget.seedColor,
+                                        ),
+                                        const SizedBox(height: 12),
+                                        Text(
+                                          'Analizando imagen con IA...',
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 16,
+                                            fontFamily: widget.fontFamily,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
                                 ),
                               ),
-                      ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                   SizedBox(height: vspace),
                   PressableScale(
-                    onTap: _saving ? () {} : _takePhoto,
+                    onTap: (_saving || _analyzing) ? () {} : _takePhoto,
                     child: ElevatedButton.icon(
-                      onPressed: _saving ? null : _takePhoto,
+                      onPressed: (_saving || _analyzing) ? null : _takePhoto,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: widget.seedColor,
                         foregroundColor: Colors.white,
@@ -281,72 +625,145 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       icon: const Icon(Icons.camera_alt_rounded),
-                      label: Text(_saving ? 'Guardando...' : 'Tomar Foto'),
+                      label: Text(
+                        _saving
+                            ? 'Guardando...'
+                            : (_analyzing
+                                  ? 'Analizando...'
+                                  : 'Analizar con IA'),
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
             SizedBox(height: vspace),
-            Container(
-              decoration: cardDeco(),
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Resumen de Nutrientes', style: heading),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      _nutriChip(
-                        'Calorías',
-                        '450 kcal',
-                        Icons.local_fire_department,
-                        widget.seedColor,
-                        body,
-                        sub,
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 350),
+              child: _hasNutrients
+                  ? Container(
+                      key: const ValueKey('resumen'),
+                      decoration: cardDeco(),
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (_plato != null && _plato!.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Text(
+                                'Plato detectado: ${_plato!}',
+                                style: heading.copyWith(fontSize: 20),
+                              ),
+                            ),
+                          Text('Resumen de Nutrientes', style: heading),
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              _nutriChip(
+                                'Calorías',
+                                _kcal != null ? '$_kcal kcal' : '0 kcal',
+                                Icons.local_fire_department,
+                                widget.seedColor,
+                                body.copyWith(fontSize: 18),
+                                sub,
+                              ),
+                              _nutriChip(
+                                'Proteínas',
+                                '${_prot?.toStringAsFixed(0) ?? '0'} g',
+                                Icons.eco, // hoja verde
+                                Colors.green,
+                                body.copyWith(fontSize: 18),
+                                sub,
+                              ),
+                              _nutriChip(
+                                'Carbs',
+                                '${_carb?.toStringAsFixed(0) ?? '0'} g',
+                                Icons
+                                    .dataset, // icono estilo pan/trigo alternativo
+                                Colors.amber.shade700,
+                                body.copyWith(fontSize: 18),
+                                sub,
+                              ),
+                              _nutriChip(
+                                'Grasas',
+                                '${_fat?.toStringAsFixed(0) ?? '0'} g',
+                                Icons.opacity,
+                                Colors.redAccent,
+                                body.copyWith(fontSize: 18),
+                                sub,
+                              ),
+                            ],
+                          ),
+                          SizedBox(height: vspace),
+                          SizedBox(
+                            height: 220,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                PieChart(
+                                  PieChartData(
+                                    sectionsSpace: 2,
+                                    centerSpaceRadius: 36,
+                                    sections: _macroSections(widget.seedColor),
+                                  ),
+                                  swapAnimationDuration: const Duration(
+                                    milliseconds: 800,
+                                  ),
+                                  swapAnimationCurve: Curves.easeOutCubic,
+                                ),
+                                Text(
+                                  'Nutrientes',
+                                  style: TextStyle(
+                                    color: isDark
+                                        ? const Color(0xFFE0E0E0)
+                                        : const Color(0xFF303030),
+                                    fontWeight: FontWeight.w700,
+                                    fontFamily: widget.fontFamily,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                      _nutriChip(
-                        'Proteínas',
-                        '25 g',
-                        Icons.egg_alt,
-                        Colors.green,
-                        body,
-                        sub,
+                    )
+                  : Container(
+                      key: const ValueKey('placeholder'),
+                      decoration: cardDeco(),
+                      padding: const EdgeInsets.all(28),
+                      child: SizedBox(
+                        height: 220,
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.fastfood_rounded,
+                                size: 52,
+                                color:
+                                    (isDark
+                                            ? Colors.white70
+                                            : Colors.grey.shade600)
+                                        .withValues(alpha: 0.9),
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                'Toma una foto para analizar nutrientes',
+                                textAlign: TextAlign.center,
+                                style: sub.copyWith(
+                                  fontSize: 16,
+                                  color: isDark
+                                      ? const Color(0xFFB0B0B0)
+                                      : const Color(0xFF6D6D6D),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-                      _nutriChip(
-                        'Carbs',
-                        '55 g',
-                        Icons.rice_bowl,
-                        Colors.amber.shade700,
-                        body,
-                        sub,
-                      ),
-                      _nutriChip(
-                        'Grasas',
-                        '18 g',
-                        Icons.opacity,
-                        Colors.redAccent,
-                        body,
-                        sub,
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: vspace),
-                  SizedBox(
-                    height: 220,
-                    child: PieChart(
-                      PieChartData(
-                        sectionsSpace: 2,
-                        centerSpaceRadius: 36,
-                        sections: _macroSections(widget.seedColor),
-                      ),
-                      swapAnimationDuration: const Duration(milliseconds: 400),
                     ),
-                  ),
-                ],
-              ),
             ),
             SizedBox(height: vspace),
             Container(
@@ -434,13 +851,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   List<PieChartSectionData> _macroSections(Color seed) {
-    final proteins = 25.0;
-    final carbs = 55.0;
-    final fats = 18.0;
+    // Usa resultados de IA; esta función solo se llama cuando hay datos
+    final proteins = _prot ?? 0.0;
+    final carbs = _carb ?? 0.0;
+    final fats = _fat ?? 0.0;
     final total = proteins + carbs + fats;
+    final safeTotal = total == 0 ? 1.0 : total;
     return [
       PieChartSectionData(
-        value: proteins / total * 100,
+        value: proteins / safeTotal * 100,
         color: Colors.green,
         title: 'Proteínas',
         radius: 70,
@@ -451,7 +870,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
       PieChartSectionData(
-        value: carbs / total * 100,
+        value: carbs / safeTotal * 100,
         color: Colors.amber.shade700,
         title: 'Carbs',
         radius: 70,
@@ -462,7 +881,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
       PieChartSectionData(
-        value: fats / total * 100,
+        value: fats / safeTotal * 100,
         color: Colors.redAccent,
         title: 'Grasas',
         radius: 70,
@@ -476,7 +895,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-class ExerciseScreen extends StatelessWidget {
+// Reemplazado activity_recognition_flutter por geolocator + sensors_plus (AGP 8+)
+enum ActivityKind { stationary, walking, running, vehicle, unknown }
+
+class ExerciseScreen extends StatefulWidget {
   final Brightness brightness;
   final Color seedColor;
   final String? fontFamily;
@@ -487,8 +909,199 @@ class ExerciseScreen extends StatelessWidget {
     this.fontFamily,
   });
   @override
+  State<ExerciseScreen> createState() => _ExerciseScreenState();
+}
+
+class _ExerciseScreenState extends State<ExerciseScreen>
+    with TickerProviderStateMixin {
+  // Reemplazado: ya no usamos activity_recognition_flutter
+  StreamSubscription<UserAccelerometerEvent>? _accelSub;
+  StreamSubscription<Position>? _posSub;
+  Timer? _chartTimer;
+  ActivityKind _currentKind = ActivityKind.unknown;
+  bool _paused = false;
+  int _dailySteps = 0;
+  double _speedKmh = 0;
+  String _lastDate = '';
+  int _stepBuffer = 0;
+  DateTime _lastStepTs = DateTime.now().subtract(const Duration(seconds: 2));
+  bool _cardioExpanded = false;
+  final List<FlSpot> _cardioSpots = [];
+  late final AnimationController _fadeCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _fadeCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 250),
+    )..forward();
+    _loadPersisted();
+    _ensurePermissionAndStart();
+  }
+
+  @override
+  void dispose() {
+    _accelSub?.cancel();
+    _posSub?.cancel();
+    _chartTimer?.cancel();
+    _fadeCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPersisted() async {
+    final prefs = await SharedPreferences.getInstance();
+    final today = DateTime.now();
+    final todayStr =
+        '${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    final savedDate = prefs.getString('last_date') ?? todayStr;
+    if (savedDate != todayStr) {
+      await prefs.setInt('daily_steps', 0);
+      await prefs.setString('last_date', todayStr);
+      setState(() {
+        _dailySteps = 0;
+        _lastDate = todayStr;
+      });
+    } else {
+      setState(() {
+        _dailySteps = prefs.getInt('daily_steps') ?? 0;
+        _lastDate = savedDate;
+      });
+    }
+  }
+
+  Future<void> _persistSteps() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('daily_steps', _dailySteps);
+    if (_lastDate.isNotEmpty) {
+      await prefs.setString('last_date', _lastDate);
+    }
+  }
+
+  Future<void> _appendLog(String type, int delta) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('activity_logs') ?? <String>[];
+    final entry = jsonEncode({
+      'timestamp': DateTime.now().toIso8601String(),
+      'type': type,
+      'steps_delta': delta,
+    });
+    raw.add(entry);
+    await prefs.setStringList('activity_logs', raw);
+  }
+
+  Future<void> _ensurePermissionAndStart() async {
+    bool enabled = await Geolocator.isLocationServiceEnabled();
+    if (!enabled && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Activa el servicio de ubicación')),
+      );
+    }
+    LocationPermission perm = await Geolocator.checkPermission();
+    if (perm == LocationPermission.denied) {
+      perm = await Geolocator.requestPermission();
+    }
+    if (perm == LocationPermission.deniedForever) {
+      if (!mounted) return;
+      await showDialog(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Permiso de ubicación'),
+          content: const Text(
+            'Habilita la ubicación en ajustes para registrar tu actividad.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c),
+              child: const Text('Aceptar'),
+            ),
+          ],
+        ),
+      );
+    }
+    _startStreams();
+  }
+
+  void _startStreams() {
+    _posSub =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 10,
+          ),
+        ).listen((pos) {
+          setState(() {
+            _speedKmh = ((pos.speed.isNaN ? 0.0 : pos.speed.toDouble()) * 3.6);
+            if (_speedKmh > 15.0) {
+              _currentKind = ActivityKind.vehicle;
+            } else if (_speedKmh < 1.0) {
+              // Solo marcamos estacionario si no estamos sumando pasos activos
+              if (_currentKind != ActivityKind.walking &&
+                  _currentKind != ActivityKind.running) {
+                _currentKind = ActivityKind.stationary;
+              }
+            }
+          });
+        });
+    _accelSub = userAccelerometerEventStream().listen(_onAccel);
+    _chartTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      final t = _cardioSpots.isEmpty ? 0.0 : (_cardioSpots.last.x + 1.0);
+      final y = _stepBuffer.toDouble();
+      setState(() {
+        _cardioSpots.add(FlSpot(t, y));
+        if (_cardioSpots.length > 60) {
+          _cardioSpots.removeAt(0);
+        }
+        _stepBuffer = 0;
+      });
+    });
+  }
+
+  void _onAccel(UserAccelerometerEvent e) {
+    if (_paused) return;
+    final mag = math.sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+
+    ActivityKind inferred = _currentKind;
+    if (_speedKmh > 15.0) {
+      inferred = ActivityKind.vehicle;
+    } else if (_speedKmh < 1.0) {
+      inferred = ActivityKind.stationary;
+    } else if (_speedKmh < 6.0 && mag > 1.2) {
+      inferred = ActivityKind.walking;
+    } else if (_speedKmh < 12.0 && mag > 1.6) {
+      inferred = ActivityKind.running;
+    }
+
+    if (inferred != _currentKind) {
+      setState(() => _currentKind = inferred);
+      _appendLog('activity:$inferred', 0);
+    }
+
+    if (_speedKmh >= 15.0) return; // no contamos en vehículo
+    if (_currentKind != ActivityKind.walking &&
+        _currentKind != ActivityKind.running) {
+      return;
+    }
+    final threshold = _currentKind == ActivityKind.running ? 1.6 : 1.2;
+    final now = DateTime.now();
+    if (mag > threshold && now.difference(_lastStepTs).inMilliseconds > 350) {
+      _lastStepTs = now;
+      final next = _dailySteps + 1;
+      final deltaBucket = _stepBuffer + 1;
+      setState(() {
+        _dailySteps = next;
+        _stepBuffer = deltaBucket;
+      });
+      if (_dailySteps % 10 == 0) {
+        _persistSteps();
+        _appendLog('steps', 10);
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final isDark = brightness == Brightness.dark;
+    final isDark = widget.brightness == Brightness.dark;
     final background = isDark
         ? const Color(0xFF121212)
         : (Colors.grey[50] ?? Colors.white);
@@ -496,24 +1109,24 @@ class ExerciseScreen extends StatelessWidget {
       fontSize: 22,
       fontWeight: FontWeight.w800,
       color: isDark ? const Color(0xFFEDEDED) : const Color(0xFF111111),
-      fontFamily: fontFamily,
+      fontFamily: widget.fontFamily,
     );
     final body = TextStyle(
       fontSize: 16,
       color: isDark ? const Color(0xFFD0D0D0) : const Color(0xFF1F1F1F),
-      fontFamily: fontFamily,
+      fontFamily: widget.fontFamily,
     );
     final appBarColor = isDark
-        ? seedColor.withAlpha(80)
-        : seedColor.withAlpha(120);
+        ? widget.seedColor.withAlpha(80)
+        : widget.seedColor.withAlpha(120);
     final vspace = MediaQuery.of(context).size.height / 50;
     BoxDecoration cardDeco() => BoxDecoration(
       gradient: LinearGradient(
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
         colors: [
-          seedColor.withAlpha(isDark ? 28 : 36),
-          seedColor.withAlpha(isDark ? 18 : 26),
+          widget.seedColor.withAlpha(isDark ? 28 : 36),
+          widget.seedColor.withAlpha(isDark ? 18 : 26),
           Colors.transparent,
         ],
       ),
@@ -522,6 +1135,8 @@ class ExerciseScreen extends StatelessWidget {
         color: isDark ? const Color(0xFF424242) : const Color(0x11000000),
       ),
     );
+    final goal = 10000;
+    final progress = math.min(1.0, _dailySteps / goal.toDouble());
     return Scaffold(
       backgroundColor: background,
       appBar: AppBar(
@@ -532,34 +1147,85 @@ class ExerciseScreen extends StatelessWidget {
         title: const Text('Ejercicio'),
       ),
       body: ListView(
+        physics: const ClampingScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
         children: [
           Container(
             decoration: cardDeco(),
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(24),
             child: Column(
               children: [
                 SizedBox(
-                  width: 140,
-                  height: 140,
+                  width: 160,
+                  height: 160,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
                       SizedBox(
-                        width: 140,
-                        height: 140,
+                        width: 160,
+                        height: 160,
                         child: CircularProgressIndicator(
-                          value: 0.7,
-                          strokeWidth: 10,
-                          color: seedColor,
+                          value: progress == 0 ? null : progress,
+                          strokeWidth: 12,
+                          color: widget.seedColor,
                           backgroundColor: isDark
                               ? const Color(0xFF2C2C2C)
                               : const Color(0xFFE0E0E0),
                         ),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            '${(progress * 100).toStringAsFixed(0)}% completado',
+                            style: body.copyWith(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 250),
+                  child: Text(
+                    'Pasos hoy: $_dailySteps',
+                    key: ValueKey(_dailySteps),
+                    style: heading.copyWith(fontSize: 20),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                FadeTransition(
+                  opacity: _fadeCtrl,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        _activityIcon(_currentKind),
+                        color: _currentKind == ActivityKind.vehicle
+                            ? Colors.grey
+                            : widget.seedColor,
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          _activityLabel(_currentKind),
+                          style: body,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
                       Text(
-                        '70% completado',
-                        style: body.copyWith(fontWeight: FontWeight.w700),
+                        '${_speedKmh.toStringAsFixed(1)} km/h',
+                        style: body.copyWith(
+                          color: isDark
+                              ? const Color(0xFFA0B0C0)
+                              : const Color(0xFF616161),
+                        ),
                       ),
                     ],
                   ),
@@ -571,41 +1237,56 @@ class ExerciseScreen extends StatelessWidget {
           Container(
             decoration: cardDeco(),
             padding: const EdgeInsets.all(16),
-            child: GridView.count(
-              physics: const NeverScrollableScrollPhysics(),
-              shrinkWrap: true,
-              crossAxisCount: MediaQuery.of(context).size.width > 700 ? 4 : 2,
-              childAspectRatio: 1.2,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
+            child: Column(
               children: [
-                _routineTile(
-                  seedColor,
-                  isDark,
-                  body,
-                  Icons.directions_run,
-                  'Cardio',
+                GridView.count(
+                  physics: const NeverScrollableScrollPhysics(),
+                  shrinkWrap: true,
+                  crossAxisCount: MediaQuery.of(context).size.width > 700
+                      ? 4
+                      : 2,
+                  childAspectRatio: 1.2,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  children: [
+                    _routineTile(
+                      widget.seedColor,
+                      isDark,
+                      body,
+                      Icons.directions_run,
+                      'Cardio',
+                      onTap: _toggleCardio,
+                    ),
+                    _routineTile(
+                      widget.seedColor,
+                      isDark,
+                      body,
+                      Icons.fitness_center,
+                      'Fuerza',
+                    ),
+                    _routineTile(
+                      widget.seedColor,
+                      isDark,
+                      body,
+                      Icons.self_improvement,
+                      'Yoga',
+                    ),
+                    _routineTile(
+                      widget.seedColor,
+                      isDark,
+                      body,
+                      Icons.accessibility_new,
+                      'Estiramientos',
+                    ),
+                  ],
                 ),
-                _routineTile(
-                  seedColor,
-                  isDark,
-                  body,
-                  Icons.fitness_center,
-                  'Fuerza',
-                ),
-                _routineTile(
-                  seedColor,
-                  isDark,
-                  body,
-                  Icons.self_improvement,
-                  'Yoga',
-                ),
-                _routineTile(
-                  seedColor,
-                  isDark,
-                  body,
-                  Icons.accessibility_new,
-                  'Estiramientos',
+                AnimatedCrossFade(
+                  firstChild: const SizedBox.shrink(),
+                  secondChild: _cardioExpandedSection(isDark, heading, body),
+                  crossFadeState: _cardioExpanded
+                      ? CrossFadeState.showSecond
+                      : CrossFadeState.showFirst,
+                  duration: const Duration(milliseconds: 250),
                 ),
               ],
             ),
@@ -613,7 +1294,7 @@ class ExerciseScreen extends StatelessWidget {
           SizedBox(height: vspace),
           Container(
             decoration: cardDeco(),
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -621,10 +1302,13 @@ class ExerciseScreen extends StatelessWidget {
                   'Actividad semanal',
                   style: heading.copyWith(fontSize: 20),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 4),
                 SizedBox(
                   height: 220,
-                  child: _weeklyBarChart(seedColor, isDark),
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: _weeklyBarChart(widget.seedColor, isDark),
+                  ),
                 ),
               ],
             ),
@@ -634,38 +1318,55 @@ class ExerciseScreen extends StatelessWidget {
     );
   }
 
+  void _toggleCardio() {
+    setState(() => _cardioExpanded = !_cardioExpanded);
+  }
+
   Widget _routineTile(
     Color seed,
     bool isDark,
     TextStyle body,
     IconData icon,
-    String title,
-  ) {
+    String title, {
+    VoidCallback? onTap,
+  }) {
     return Material(
       color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
       borderRadius: BorderRadius.circular(16),
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
-        onTap: () {},
+        onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(14),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, color: seed, size: 36),
-              const SizedBox(height: 8),
-              Text(title, style: body.copyWith(fontWeight: FontWeight.w700)),
-              const SizedBox(height: 8),
+              Icon(icon, color: seed, size: 34),
+              const SizedBox(height: 6),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  title,
+                  style: body.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+              const SizedBox(height: 6),
               OutlinedButton(
-                onPressed: () {},
+                onPressed: onTap,
                 style: OutlinedButton.styleFrom(
                   foregroundColor: seed,
                   side: BorderSide(color: seed.withAlpha(180)),
+                  minimumSize: const Size(0, 36),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 8,
+                    horizontal: 16,
+                  ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
+                  textStyle: const TextStyle(fontSize: 14),
                 ),
-                child: const Text('Empezar'),
+                child: const FittedBox(child: Text('Empezar')),
               ),
             ],
           ),
@@ -674,9 +1375,226 @@ class ExerciseScreen extends StatelessWidget {
     );
   }
 
+  Widget _cardioExpandedSection(
+    bool isDark,
+    TextStyle heading,
+    TextStyle body,
+  ) {
+    final color = _currentKind == ActivityKind.vehicle
+        ? Colors.grey
+        : widget.seedColor;
+    final pct = math.min(1.0, _dailySteps / 10000.0);
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: isDark ? const Color(0xFF2A2A2A) : const Color(0x11000000),
+        ),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              SizedBox(
+                width: 96,
+                height: 96,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    CircularProgressIndicator(
+                      value: pct,
+                      strokeWidth: 10,
+                      color: color,
+                      backgroundColor: isDark
+                          ? const Color(0xFF2C2C2C)
+                          : const Color(0xFFE0E0E0),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          '${(_dailySteps / 100).toStringAsFixed(0)}%',
+                          style: heading.copyWith(fontSize: 18),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      child: Text(
+                        '$_dailySteps pasos',
+                        key: ValueKey(_dailySteps),
+                        style: heading.copyWith(fontSize: 24),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Icon(_activityIcon(_currentKind), color: color),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _activityLabel(_currentKind),
+                            style: body,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '${_speedKmh.toStringAsFixed(1)} km/h • ${(_dailySteps * 0.04).toStringAsFixed(0)} kcal',
+                      style: body.copyWith(
+                        color: isDark
+                            ? const Color(0xFFA0B0C0)
+                            : const Color(0xFF616161),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              PressableScale(
+                onTap: () => setState(() => _paused = !_paused),
+                child: FilledButton.tonalIcon(
+                  onPressed: () => setState(() => _paused = !_paused),
+                  icon: Icon(_paused ? Icons.play_arrow : Icons.pause),
+                  label: Text(_paused ? 'Reanudar' : 'Pausar'),
+                  style: FilledButton.styleFrom(
+                    foregroundColor: isDark ? Colors.white : Colors.black87,
+                    backgroundColor: color.withAlpha(40),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 10,
+                      horizontal: 14,
+                    ),
+                    minimumSize: const Size(0, 40),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 180,
+            child: LineChart(
+              LineChartData(
+                gridData: FlGridData(show: false),
+                borderData: FlBorderData(show: false),
+                titlesData: FlTitlesData(
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval: 10,
+                      getTitlesWidget: (v, m) {
+                        return Transform.rotate(
+                          angle: -0.6,
+                          child: Text(
+                            '${v.toInt() * 10}s',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: isDark
+                                  ? const Color(0xFFD0D0D0)
+                                  : const Color(0xFF616161),
+                            ),
+                          ),
+                        );
+                      },
+                      reservedSize: 26,
+                    ),
+                  ),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 28,
+                      getTitlesWidget: (v, _) => Text(
+                        v.toInt().toString(),
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: isDark
+                              ? const Color(0xFFA0B0C0)
+                              : const Color(0xFF9E9E9E),
+                        ),
+                      ),
+                    ),
+                  ),
+                  topTitles: AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                  rightTitles: AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                ),
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: _cardioSpots.isEmpty
+                        ? [const FlSpot(0, 0)]
+                        : _cardioSpots,
+                    isCurved: true,
+                    color: color,
+                    barWidth: 3,
+                    dotData: FlDotData(show: false),
+                    belowBarData: BarAreaData(
+                      show: true,
+                      color: color.withAlpha(36),
+                    ),
+                  ),
+                ],
+                minY: 0,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  IconData _activityIcon(ActivityKind k) {
+    switch (k) {
+      case ActivityKind.running:
+        return Icons.directions_run;
+      case ActivityKind.walking:
+        return Icons.directions_walk;
+      case ActivityKind.vehicle:
+        return Icons.directions_car;
+      case ActivityKind.stationary:
+        return Icons.self_improvement;
+      default:
+        return Icons.sports_martial_arts;
+    }
+  }
+
+  String _activityLabel(ActivityKind k) {
+    switch (k) {
+      case ActivityKind.running:
+        return 'Corriendo';
+      case ActivityKind.walking:
+        return 'Caminando';
+      case ActivityKind.vehicle:
+        return 'En vehículo (no contando)';
+      case ActivityKind.stationary:
+        return 'Parado';
+      default:
+        return 'Actividad desconocida';
+    }
+  }
+
   Widget _weeklyBarChart(Color seed, bool isDark) {
     final bars = <BarChartGroupData>[];
-    final values = [3.0, 2.0, 4.0, 3.5, 2.5, 5.0, 3.0];
+    final values = [500.0, 420.0, 650.0, 720.0, 390.0, 810.0, 560.0];
     for (var i = 0; i < 7; i++) {
       bars.add(
         BarChartGroupData(
@@ -685,9 +1603,8 @@ class ExerciseScreen extends StatelessWidget {
             BarChartRodData(
               toY: values[i],
               color: seed,
-              width: 18,
+              width: 16,
               borderRadius: BorderRadius.circular(6),
-              rodStackItems: [],
             ),
           ],
         ),
@@ -695,7 +1612,11 @@ class ExerciseScreen extends StatelessWidget {
     }
     return BarChart(
       BarChartData(
-        gridData: FlGridData(show: false),
+        gridData: FlGridData(
+          show: true,
+          drawVerticalLine: false,
+          horizontalInterval: 200,
+        ),
         borderData: FlBorderData(show: false),
         titlesData: FlTitlesData(
           bottomTitles: AxisTitles(
@@ -703,24 +1624,46 @@ class ExerciseScreen extends StatelessWidget {
               showTitles: true,
               getTitlesWidget: (v, m) {
                 const days = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
+                return Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    days[v.toInt() % 7],
+                    style: TextStyle(
+                      color: isDark
+                          ? const Color(0xFFD0D0D0)
+                          : const Color(0xFF616161),
+                    ),
+                  ),
+                );
+              },
+              reservedSize: 24,
+            ),
+          ),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 32,
+              getTitlesWidget: (v, _) {
+                if (v % 400 != 0) return const SizedBox.shrink();
                 return Text(
-                  days[v.toInt() % 7],
+                  '${v.toInt()}',
                   style: TextStyle(
+                    fontSize: 10,
                     color: isDark
-                        ? const Color(0xFFD0D0D0)
-                        : const Color(0xFF616161),
+                        ? const Color(0xFFA0B0C0)
+                        : const Color(0xFF9E9E9E),
                   ),
                 );
               },
             ),
           ),
-          leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
           topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
           rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
         ),
         barGroups: bars,
+        minY: 0,
+        maxY: 1000,
       ),
-      swapAnimationDuration: const Duration(milliseconds: 400),
     );
   }
 }
@@ -742,6 +1685,24 @@ class HydrationScreen extends StatefulWidget {
 class _HydrationScreenState extends State<HydrationScreen> {
   double _liters = 1.8;
   final double _goal = 3.0;
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _liters = prefs.getDouble('hydration_liters') ?? 1.8;
+    });
+  }
+
+  Future<void> _save(double v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('hydration_liters', v);
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = widget.brightness == Brightness.dark;
@@ -896,11 +1857,17 @@ class _HydrationScreenState extends State<HydrationScreen> {
 
   Widget _addButton(double amount) {
     return PressableScale(
-      onTap: () =>
-          setState(() => _liters = (_liters + amount).clamp(0.0, 10.0)),
+      onTap: () async {
+        final v = (_liters + amount).clamp(0.0, 10.0);
+        setState(() => _liters = v);
+        await _save(v);
+      },
       child: ElevatedButton.icon(
-        onPressed: () =>
-            setState(() => _liters = (_liters + amount).clamp(0.0, 10.0)),
+        onPressed: () async {
+          final v = (_liters + amount).clamp(0.0, 10.0);
+          setState(() => _liters = v);
+          await _save(v);
+        },
         icon: const Icon(Icons.water_drop),
         label: Text('+${(amount * 1000).toInt()} ml'),
         style: ElevatedButton.styleFrom(
@@ -964,7 +1931,6 @@ class _HydrationScreenState extends State<HydrationScreen> {
         minY: 0,
         maxY: 3.5,
       ),
-      swapAnimationDuration: const Duration(milliseconds: 400),
     );
   }
 }
@@ -984,7 +1950,7 @@ class SleepScreen extends StatefulWidget {
 }
 
 class _SleepScreenState extends State<SleepScreen> {
-  double _hours = 7.5;
+  final double _hours = 7.5;
   int _rating = 4;
   final List<Map<String, String>> _log = [
     {
@@ -1057,14 +2023,32 @@ class _SleepScreenState extends State<SleepScreen> {
         title: const Text('Sueño'),
         actions: [
           IconButton(
-            onPressed: () => setState(
-              () => _log.add({
-                'fecha': 'Nuevo',
-                'dormir': '23:45',
-                'despertar': '07:15',
-                'calidad': 'Buena',
-              }),
-            ),
+            onPressed: () async {
+              final dormir = await showTimePicker(
+                context: context,
+                initialTime: const TimeOfDay(hour: 23, minute: 0),
+              );
+              if (!context.mounted) return;
+              if (dormir == null) return;
+              final despertar = await showTimePicker(
+                context: context,
+                initialTime: const TimeOfDay(hour: 7, minute: 0),
+              );
+              if (!context.mounted) return;
+              if (despertar == null) return;
+              String fmt(TimeOfDay t) =>
+                  '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+              final dormirTxt = fmt(dormir);
+              final despertarTxt = fmt(despertar);
+              setState(() {
+                _log.add({
+                  'fecha': 'Nuevo',
+                  'dormir': dormirTxt,
+                  'despertar': despertarTxt,
+                  'calidad': 'Buena',
+                });
+              });
+            },
             icon: const Icon(Icons.add),
           ),
         ],
@@ -1153,7 +2137,7 @@ class _SleepScreenState extends State<SleepScreen> {
             child: Column(
               children: [
                 ListTile(
-                  leading: Icon(Icons.no_mobile, color: widget.seedColor),
+                  leading: Icon(Icons.mobile_off, color: widget.seedColor),
                   title: Text('Evita pantallas 1 h antes', style: body),
                 ),
                 ListTile(
@@ -1217,7 +2201,6 @@ class _SleepScreenState extends State<SleepScreen> {
         barGroups: bars,
         maxY: 9,
       ),
-      swapAnimationDuration: const Duration(milliseconds: 400),
     );
   }
 }
@@ -1241,12 +2224,15 @@ class _SplashScreenState extends State<SplashScreen>
       vsync: this,
       duration: const Duration(milliseconds: 2000),
     )..forward();
-    _scale = CurvedAnimation(parent: _controller, curve: Curves.easeOutBack);
+    _scale = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutBack,
+    ).drive(Tween<double>(begin: 0.8, end: 1.0));
     _fade = CurvedAnimation(parent: _controller, curve: Curves.easeIn);
     Future.delayed(const Duration(milliseconds: 2200), () {
       if (mounted) {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const PresentationScreen()),
+          MaterialPageRoute(builder: (_) => const VidaPlusApp()),
         );
       }
     });
@@ -1260,21 +2246,35 @@ class _SplashScreenState extends State<SplashScreen>
 
   @override
   Widget build(BuildContext context) {
+    final isDark = MediaQuery.of(context).platformBrightness == Brightness.dark;
+    Color lighten(Color c, double amount) {
+      final hsl = HSLColor.fromColor(c);
+      return hsl
+          .withLightness((hsl.lightness + amount).clamp(0.0, 1.0))
+          .toColor();
+    }
+
+    Color darken(Color c, double amount) {
+      final hsl = HSLColor.fromColor(c);
+      return hsl
+          .withLightness((hsl.lightness - amount).clamp(0.0, 1.0))
+          .toColor();
+    }
+
+    final seed = const Color(0xFFE53935);
     return Scaffold(
       body: Stack(
         fit: StackFit.expand,
         children: [
           Container(
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [
-                  Color(0xFFCCFF90),
-                  Color(0xFFAEEA00),
-                  Color(0xFF7CB342),
-                ],
-                stops: [0.0, 0.5, 1.0],
+                stops: const [0.0, 1.0],
+                colors: isDark
+                    ? [const Color(0xFF0F0F10), const Color(0xFF1B1B1D)]
+                    : [lighten(seed, 0.22), darken(seed, 0.06)],
               ),
             ),
           ),
@@ -1426,7 +2426,7 @@ class _LogoVidaSaludable extends StatelessWidget {
           ),
           child: ClipOval(
             child: Image.asset(
-              'assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png',
+              'assets/WhatsApp Image 2026-02-16 at 12.16.07 PM.jpeg',
               fit: BoxFit.contain,
               errorBuilder: (context, error, stackTrace) {
                 return const Icon(
@@ -1439,11 +2439,11 @@ class _LogoVidaSaludable extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 20),
-        Text(
-          'Vida saludable',
-          style: const TextStyle(
-            fontSize: 28,
-            fontWeight: FontWeight.w700,
+        const Text(
+          'Vitu',
+          style: TextStyle(
+            fontSize: 32,
+            fontWeight: FontWeight.w800,
             letterSpacing: 0.8,
             color: Color(0xFF2E7D32),
           ),
@@ -2093,25 +3093,12 @@ class _MagazineHomeScreenState extends State<MagazineHomeScreen>
         foregroundColor: _black,
         elevation: 0,
         titleSpacing: 0,
-        title: Row(
-          children: [
-            const SizedBox(width: 8),
-            const Text(
-              'VIDA',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              decoration: BoxDecoration(
-                color: _seed,
-                borderRadius: BorderRadius.circular(2),
-              ),
-              child: const Text(
-                'PLUS',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-              ),
-            ),
-          ],
+        title: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 8),
+          child: Text(
+            'Vitu',
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
         ),
         actions: const [SizedBox(width: 8)],
         bottom: PreferredSize(
@@ -2222,7 +3209,7 @@ class _HomeContent extends StatelessWidget {
                   borderRadius: BorderRadius.circular(12),
                   image: const DecorationImage(
                     image: AssetImage(
-                      'assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png',
+                      'assets/WhatsApp Image 2026-02-16 at 12.16.07 PM.jpeg',
                     ),
                     fit: BoxFit.cover,
                   ),
@@ -2292,12 +3279,16 @@ class SettingsScreen extends StatefulWidget {
   final Color seed;
   final String? fontFamily;
   final bool followLocation;
+  final void Function(SettingsData data)? onChanged;
+  final bool asTab;
   const SettingsScreen({
     super.key,
     required this.brightness,
     required this.seed,
     required this.fontFamily,
     required this.followLocation,
+    this.onChanged,
+    this.asTab = false,
   });
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -2308,6 +3299,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late Color _seed;
   String? _fontFamily;
   late bool _followLocation;
+  void _emit() {
+    final cb = widget.onChanged;
+    if (cb != null) {
+      cb(
+        SettingsData(
+          brightness: _brightness,
+          seed: _seed,
+          fontFamily: _fontFamily,
+          followLocation: _followLocation,
+        ),
+      );
+    }
+  }
 
   final _palette = <MapEntry<String, Color>>[
     const MapEntry('Amarillo', Color(0xFFFFECB3)),
@@ -2601,8 +3605,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ],
                         selected: {_brightness},
-                        onSelectionChanged: (s) =>
-                            setState(() => _brightness = s.first),
+                        onSelectionChanged: (s) {
+                          setState(() => _brightness = s.first);
+                          _emit();
+                        },
                         style: segmentedStyle,
                       ),
                       SizedBox(height: vspace),
@@ -2670,8 +3676,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                     color: Colors.transparent,
                                     child: InkWell(
                                       customBorder: const CircleBorder(),
-                                      onTap: () =>
-                                          setState(() => _seed = e.value),
+                                      onTap: () {
+                                        setState(() => _seed = e.value);
+                                        _emit();
+                                      },
                                       child: AnimatedScale(
                                         duration: const Duration(
                                           milliseconds: 220,
@@ -2903,8 +3911,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               style: TextStyle(fontSize: 14, color: subColor),
                             ),
                             value: _followLocation,
-                            onChanged: (v) =>
-                                setState(() => _followLocation = v),
+                            onChanged: (v) {
+                              setState(() => _followLocation = v);
+                              _emit();
+                            },
                           ),
                         ),
                         Tooltip(
@@ -3106,6 +4116,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ? null
                                 : 'serif',
                           );
+                          _emit();
                         },
                         style: segmentedStyle,
                       ),
@@ -3257,67 +4268,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
             SizedBox(height: vspace),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: isDark ? bodyColor : subColor,
-                      side: BorderSide(
-                        color: isDark
-                            ? _seed.withAlpha(120)
-                            : _seed.withAlpha(160),
-                      ),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: const [
-                        Icon(Icons.close),
-                        SizedBox(width: 8),
-                        Text('Cancelar'),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _seed,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      elevation: 4,
-                    ),
-                    onPressed: () {
-                      Navigator.of(context).pop(
-                        SettingsData(
-                          brightness: _brightness,
-                          seed: _seed,
-                          fontFamily: _fontFamily,
-                          followLocation: _followLocation,
+            widget.asTab
+                ? const SizedBox.shrink()
+                : Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: isDark ? bodyColor : subColor,
+                            side: BorderSide(
+                              color: isDark
+                                  ? _seed.withAlpha(120)
+                                  : _seed.withAlpha(160),
+                            ),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: const [
+                              Icon(Icons.close),
+                              SizedBox(width: 8),
+                              Text('Cancelar'),
+                            ],
+                          ),
                         ),
-                      );
-                    },
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: const [
-                        Icon(Icons.check),
-                        SizedBox(width: 8),
-                        Text('Guardar'),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _seed,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            elevation: 4,
+                          ),
+                          onPressed: () {
+                            Navigator.of(context).pop(
+                              SettingsData(
+                                brightness: _brightness,
+                                seed: _seed,
+                                fontFamily: _fontFamily,
+                                followLocation: _followLocation,
+                              ),
+                            );
+                          },
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: const [
+                              Icon(Icons.check),
+                              SizedBox(width: 8),
+                              Text('Guardar'),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-              ],
-            ),
           ],
         ),
       ),

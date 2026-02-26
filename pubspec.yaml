@@ -12,29 +12,39 @@ dependencies:
     sdk: flutter
 
   cupertino_icons: ^1.0.8
+  image_picker: ^1.1.2
+  path_provider: ^2.1.4
+  fl_chart: ^0.68.0
+  shared_preferences: ^2.2.3
+  # geolocator: ^12.0.0
+  # sensors_plus: ^5.0.0
+  # activity_recognition_flutter: ^4.2.0
+  geolocator: ^12.0.0
+  sensors_plus: ^5.0.0
+  # Reemplazado: activity_recognition_flutter eliminado por incompatibilidad AGP 8+
+  # google_generative_ai: ^0.5.0
+  google_generative_ai: ^0.5.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
   flutter_lints: ^6.0.0
-  flutter_launcher_icons: ^0.14.4  # ← Actualizado a la versión más reciente
+  flutter_launcher_icons: ^0.14.4
+  # Si no lo tienes instalado, agrega esta línea en dev_dependencies:
+  # flutter_launcher_icons: ^0.13.1
 
 flutter:
 
   uses-material-design: true
 
   assets:
-    - assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png
+    - assets/WhatsApp Image 2026-02-16 at 12.16.07 PM.jpeg
 
 flutter_launcher_icons:
-  android: "launcher_icon"                      # Nombre claro para Android
+  android: true
   ios: true
-  image_path: "assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png"  # Para iOS y fallback Android
-
-  # Adaptive icon para Android moderno (recomendado)
-  adaptive_icon_background: "#AEEA00"           # Tu color de fondo
-  adaptive_icon_foreground: "assets/Gemini_Generated_Image_x2zl3xx2zl3xx2zl.png"
-  adaptive_icon_foreground_inset: 0.20          # 20% de padding interno → evita que se corte o estire
-
-  min_sdk_android: 21                           # Puedes bajarlo a 19 si quieres más compatibilidad antigua
+  image_path: "assets/WhatsApp Image 2026-02-16 at 12.16.07 PM.jpeg"
+  remove_alpha_ios: true
+  # Después de guardar este archivo, ejecuta:
+  # flutter pub run flutter_launcher_icons
