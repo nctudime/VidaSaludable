@@ -23,7 +23,9 @@ dependencies:
   sensors_plus: ^5.0.0
   # Reemplazado: activity_recognition_flutter eliminado por incompatibilidad AGP 8+
   # google_generative_ai: ^0.5.0
-  google_generative_ai: ^0.5.0
+  google_generative_ai: ^0.4.0
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
 
 dev_dependencies:
   flutter_test:

@@ -13,9 +13,16 @@ import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 // Reemplazado activity_recognition_flutter por geolocator + sensors_plus (AGP 8+)
 import 'package:google_generative_ai/google_generative_ai.dart';
+// pubspec.yaml (agregar dependencias)
+// hive: ^2.2.3
+// hive_flutter: ^1.1.0
+import 'package:hive_flutter/hive_flutter.dart';
+// Corregido lint: unnecessary import
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Hive.initFlutter();
+  await Hive.openBox('userBox');
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const MyApp());
 }
@@ -37,6 +44,157 @@ class MyApp extends StatelessWidget {
   }
 }
 
+class User {
+  final String nombre;
+  final String apellido;
+  final String genero;
+  final int edad;
+  final double altura; // cm
+  final double peso; // kg
+  final String correo;
+  final String contrasena; // simple local
+  final String? brightness; // 'light' | 'dark'
+  final int? seedColor; // ARGB int
+  final String? fontFamily; // null | 'serif' u otras
+  final bool? followLocation;
+  const User({
+    required this.nombre,
+    required this.apellido,
+    required this.genero,
+    required this.edad,
+    required this.altura,
+    required this.peso,
+    required this.correo,
+    required this.contrasena,
+    this.brightness,
+    this.seedColor,
+    this.fontFamily,
+    this.followLocation,
+  });
+  Map<String, dynamic> toMap() => {
+    'nombre': nombre,
+    'apellido': apellido,
+    'genero': genero,
+    'edad': edad,
+    'altura': altura,
+    'peso': peso,
+    'correo': correo,
+    'contrasena': contrasena,
+    'brightness': brightness,
+    'seedColor': seedColor,
+    'fontFamily': fontFamily,
+    'followLocation': followLocation,
+  };
+  factory User.fromMap(Map map) {
+    return User(
+      nombre: '${map['nombre'] ?? ''}',
+      apellido: '${map['apellido'] ?? ''}',
+      genero: '${map['genero'] ?? ''}',
+      edad: (map['edad'] is int)
+          ? map['edad']
+          : int.tryParse('${map['edad'] ?? 0}') ?? 0,
+      altura: (map['altura'] is double)
+          ? map['altura']
+          : double.tryParse('${map['altura'] ?? 0}') ?? 0.0,
+      peso: (map['peso'] is double)
+          ? map['peso']
+          : double.tryParse('${map['peso'] ?? 0}') ?? 0.0,
+      correo: '${map['correo'] ?? ''}',
+      contrasena: '${map['contrasena'] ?? ''}',
+      brightness: map['brightness'] == null ? null : '${map['brightness']}',
+      seedColor: (map['seedColor'] is int)
+          ? map['seedColor']
+          : int.tryParse('${map['seedColor'] ?? ''}'),
+      fontFamily: map['fontFamily'] == null ? null : '${map['fontFamily']}',
+      followLocation: map['followLocation'] == null
+          ? null
+          : (map['followLocation'] is bool
+                ? map['followLocation']
+                : '${map['followLocation']}' == 'true'),
+    );
+  }
+}
+
+Box get _userBox => Hive.box('userBox');
+String? getCurrentUserEmail() {
+  final v = _userBox.get('currentUserEmail');
+  if (v is String && v.isNotEmpty) return v;
+  return null;
+}
+
+User? getUserByEmail(String correo) {
+  final raw = _userBox.get('user:$correo');
+  if (raw is Map) return User.fromMap(raw);
+  return null;
+}
+
+User? getCurrentUser() {
+  final email = getCurrentUserEmail();
+  if (email == null) return null;
+  return getUserByEmail(email);
+}
+
+Future<void> saveCurrentUser(User u) async {
+  await _userBox.put('user:${u.correo}', u.toMap());
+  await _userBox.put('currentUserEmail', u.correo);
+}
+
+bool verifyLogin(String correo, String contrasena) {
+  final u = getUserByEmail(correo.trim().toLowerCase());
+  if (u == null) return false;
+  return u.contrasena == contrasena;
+}
+
+String buildUserPromptPersonalization() {
+  final u = getCurrentUser();
+  if (u == null) return '';
+  final g = u.genero.isEmpty ? 'No especificado' : u.genero;
+  final edad = u.edad > 0 ? u.edad : 0;
+  final altura = u.altura > 0 ? u.altura : 0;
+  final peso = u.peso > 0 ? u.peso : 0;
+  return '\nDatos del usuario: edad $edad años, peso ${peso.toStringAsFixed(peso % 1 == 0 ? 0 : 1)} kg, altura ${altura.toStringAsFixed(altura % 1 == 0 ? 0 : 1)} cm, género $g. Personaliza las recomendaciones considerando estas características.\n';
+}
+
+class _Receta {
+  final String nombre;
+  final String tiempo;
+  final String dificultad;
+  final String? imagenUrl;
+  final String? imagenDesc;
+  final String? porque;
+  final List<_Ingrediente> ingredientes;
+  final _Nutricion? nutricion;
+  _Receta({
+    required this.nombre,
+    required this.tiempo,
+    required this.dificultad,
+    this.imagenUrl,
+    this.imagenDesc,
+    this.porque,
+    required this.ingredientes,
+    this.nutricion,
+  });
+}
+
+class _Ingrediente {
+  final String nombre;
+  final String tienda;
+  _Ingrediente(this.nombre, this.tienda);
+}
+
+class _Nutricion {
+  final int kcal;
+  final double proteinas;
+  final double carbohidratos;
+  final double grasas;
+  _Nutricion({
+    required this.kcal,
+    required this.proteinas,
+    required this.carbohidratos,
+    required this.grasas,
+  });
+}
+
 class VidaPlusApp extends StatefulWidget {
   const VidaPlusApp({super.key});
   @override
@@ -49,6 +207,23 @@ class _VidaPlusAppState extends State<VidaPlusApp> {
   Color _seedColor = const Color(0xFF80CBC4);
   String? _fontFamily;
   bool _followLocation = false;
+  @override
+  void initState() {
+    super.initState();
+    final u = getCurrentUser();
+    if (u != null) {
+      if ('${u.brightness}' == 'dark') {
+        _brightness = Brightness.dark;
+      } else if ('${u.brightness}' == 'light') {
+        _brightness = Brightness.light;
+      }
+      if (u.seedColor is int) {
+        _seedColor = Color(u.seedColor!);
+      }
+      _fontFamily = u.fontFamily;
+      _followLocation = u.followLocation ?? false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -168,11 +343,14 @@ class _HomeScreenState extends State<HomeScreen> {
   // Gemini es autónomo: solo necesita internet, no BD ni servidor propio
   late GenerativeModel _geminiModel; // ¡Cambia la API key en initState!
   bool _analyzing = false;
+  final List<File> _savedPhotos = [];
   String? _plato;
   int? _kcal;
   double? _prot;
   double? _carb;
   double? _fat;
+  List<_Receta> _recetasRecomendadas = [];
+  bool _cargandoRecetas = false;
 
   bool get _hasNutrients =>
       _prot != null &&
@@ -186,91 +364,34 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Clave API real – NUNCA la subas a GitHub. Usa .env o constante segura en producción.
     // Genera nueva en https://aistudio.google.com/app/apikey si esta falla.
-    const apiKey = 'AIzaSyD8IL51lskViMD7NxcHYGnNvOChFMJfSVg';
+    const apiKey = 'AIzaSyAey5Jvw0-qUh50GYh2bOBZ8z7YWbQXEdk';
 
     // Inicializa el modelo de Gemini
     _geminiModel = GenerativeModel(
-      model: 'gemini-1.5-flash', // v1
+      model: 'gemini-2.5-flash', // v1
       apiKey: apiKey,
     );
 
     // Verificación inicial de conectividad con Gemini (ping)
     Future.microtask(() async {
       try {
+        debugPrint("Intentando ping con modelo: gemini-pro-vision");
         final ct = await _geminiModel.countTokens([Content.text('test')]);
+        debugPrint("Respuesta ping: ${ct.totalTokens} tokens");
         debugPrint('Gemini ping OK: ${ct.totalTokens} tokens');
       } on GenerativeAIException catch (e, st) {
         debugPrint('Gemini ping failed: ${e.message}');
         debugPrint('Stack trace: $st');
-        // Fallback para errores de modelo/versión (v1beta o modelo no encontrado)
-        final msg = e.message.toLowerCase(); // Quitado '??' innecesario
-        final looksLikeV1Beta =
-            msg.contains('v1beta') ||
-            msg.contains('not found') ||
-            msg.contains('not supported') ||
-            msg.contains('model');
-        if (looksLikeV1Beta) {
-          try {
-            // Intento 1: usar alias latest de flash
-            _geminiModel = GenerativeModel(
-              model: 'gemini-1.5-flash-latest',
-              apiKey: apiKey,
+        if (mounted) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Error de conexión con Gemini. Revisa internet o genera nueva clave en `https://aistudio.google.com/app/apikey`',
+                ),
+              ),
             );
-            final ct2 = await _geminiModel.countTokens([Content.text('test')]);
-            debugPrint(
-              'Fallback gemini-1.5-flash-latest OK: ${ct2.totalTokens} tokens',
-            );
-            if (mounted) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'API antigua detectada: usando gemini-1.5-flash-latest',
-                    ),
-                  ),
-                );
-              });
-            }
-          } on Exception catch (e2, st2) {
-            debugPrint('Fallback flash-latest falló: $e2');
-            debugPrint('Stack trace: $st2');
-            try {
-              // Intento 2: gemini-pro (texto)
-              _geminiModel = GenerativeModel(
-                model: 'gemini-pro',
-                apiKey: apiKey,
-              );
-              final ct3 = await _geminiModel.countTokens([
-                Content.text('test'),
-              ]);
-              debugPrint('Fallback gemini-pro OK: ${ct3.totalTokens} tokens');
-              if (mounted) {
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'API antigua detectada: usando gemini-pro como fallback',
-                      ),
-                    ),
-                  );
-                });
-              }
-            } on Exception catch (e3, st3) {
-              debugPrint('Fallback gemini-pro falló: $e3');
-              debugPrint('Stack trace: $st3');
-              if (mounted) {
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'API versión antigua detectada – actualiza paquete o clave',
-                      ),
-                    ),
-                  );
-                });
-              }
-            }
-          }
+          });
         }
       } on SocketException catch (e, st) {
         debugPrint('Sin internet (ping): $e');
@@ -280,23 +401,39 @@ class _HomeScreenState extends State<HomeScreen> {
         debugPrint('Stack trace: $st');
       }
     });
+    Future.microtask(_cargarRecetasRecomendadas);
   }
 
   Future<void> _takePhoto() async {
+    // Conservado por compatibilidad; abre selector de fuente
+    await _selectImageSource();
+  }
+
+  Future<void> _pickFromSource(ImageSource source) async {
     final ImagePicker picker = ImagePicker();
     final XFile? xfile = await picker.pickImage(
-      source: ImageSource.camera,
+      source: source,
       imageQuality: 85,
     );
-    if (xfile == null) return;
+    if (xfile == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No se seleccionó imagen')),
+        );
+      }
+      return;
+    }
     setState(() => _saving = true);
     try {
       final dir = await getApplicationDocumentsDirectory();
       final ts = DateTime.now().millisecondsSinceEpoch;
-      final path = '${dir.path}/comida_$ts.jpg';
+      final path = '${dir.path}/vitu_food_$ts.jpg';
       final file = File(path);
       await file.writeAsBytes(await xfile.readAsBytes());
-      setState(() => _photo = file);
+      setState(() {
+        _photo = file;
+        _savedPhotos.insert(0, file);
+      });
       setState(() => _analyzing = true);
       await _analizarConGemini(file);
     } finally {
@@ -307,6 +444,49 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     }
+  }
+
+  Future<void> _selectImageSource() async {
+    if (_saving || _analyzing) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: (widget.brightness == Brightness.dark)
+          ? const Color(0xFF1E1E1E)
+          : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: Icon(Icons.camera_alt, color: widget.seedColor),
+                  title: const Text('Cámara'),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    _pickFromSource(ImageSource.camera);
+                  },
+                ),
+                ListTile(
+                  leading: Icon(Icons.photo_library, color: widget.seedColor),
+                  title: const Text('Galería'),
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    _pickFromSource(ImageSource.gallery);
+                  },
+                ),
+                const SizedBox(height: 6),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   void _showSnack(String msg, {bool error = false, VoidCallback? onRetry}) {
@@ -341,7 +521,8 @@ class _HomeScreenState extends State<HomeScreen> {
         );
         return;
       }
-      const prompt = '''
+      final prompt =
+          '''
 Analiza esta comida en la foto.
 Identifica el plato principal aproximado.
 Estima valores nutricionales aproximados.
@@ -351,6 +532,7 @@ Calorías: [número] kcal
 Proteínas: [número] g
 Carbohidratos: [número] g
 Grasas: [número] g
+${buildUserPromptPersonalization()}
 ''';
       final bytes = await foto.readAsBytes();
       final lower = foto.path.toLowerCase();
@@ -430,8 +612,17 @@ Grasas: [número] g
       if (mounted) {
         final msg = e.message;
         debugPrint('GenerativeAIException: $msg');
+        final lm = msg.toLowerCase();
+        final modelIssue =
+            lm.contains('v1beta') ||
+            lm.contains('not found') ||
+            lm.contains('not supported') ||
+            lm.contains('model');
+        final text = modelIssue
+            ? 'Modelo no disponible en esta versión – prueba actualizar paquete o usar gemini-pro-vision'
+            : 'Error de IA: $msg';
         _showSnack(
-          'Error de IA: $msg',
+          text,
           error: true,
           onRetry: () {
             if (_photo != null) _analizarConGemini(_photo!);
@@ -628,12 +819,54 @@ Grasas: [número] g
                       label: Text(
                         _saving
                             ? 'Guardando...'
-                            : (_analyzing
-                                  ? 'Analizando...'
-                                  : 'Analizar con IA'),
+                            : (_analyzing ? 'Analizando...' : 'Tomar Foto'),
                       ),
                     ),
                   ),
+                  if (_savedPhotos.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Fotos guardadas',
+                      style: body.copyWith(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    GridView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _savedPhotos.length > 8
+                          ? 8
+                          : _savedPhotos.length,
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 4,
+                            mainAxisSpacing: 6,
+                            crossAxisSpacing: 6,
+                          ),
+                      itemBuilder: (context, index) {
+                        final f = _savedPhotos[index];
+                        return GestureDetector(
+                          onTap: () async {
+                            if (_saving || _analyzing) return;
+                            setState(() {
+                              _photo = f;
+                              _analyzing = true;
+                            });
+                            try {
+                              await _analizarConGemini(f);
+                            } finally {
+                              if (mounted) {
+                                setState(() => _analyzing = false);
+                              }
+                            }
+                          },
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.file(f, fit: BoxFit.cover),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -772,40 +1005,142 @@ Grasas: [número] g
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Tips útiles', style: heading.copyWith(fontSize: 20)),
-                  const SizedBox(height: 6),
-                  _tipTile(
-                    isDark,
-                    widget.seedColor,
-                    body,
-                    sub,
-                    Icons.water_drop,
-                    'Bebe agua después de comer',
+                  Text(
+                    'Recetas recomendadas',
+                    style: heading.copyWith(fontSize: 22),
                   ),
-                  _tipTile(
-                    isDark,
-                    widget.seedColor,
-                    body,
-                    sub,
-                    Icons.balance,
-                    'Equilibra tu plato',
-                  ),
-                  _tipTile(
-                    isDark,
-                    widget.seedColor,
-                    body,
-                    sub,
-                    Icons.local_florist,
-                    'Prefiere alimentos frescos',
-                  ),
-                  _tipTile(
-                    isDark,
-                    widget.seedColor,
-                    body,
-                    sub,
-                    Icons.timer,
-                    'Come sin prisa y mastica bien',
-                  ),
+                  const SizedBox(height: 10),
+                  if (_cargandoRecetas)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      child: Center(
+                        child: SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 3,
+                            color: widget.seedColor,
+                          ),
+                        ),
+                      ),
+                    )
+                  else if (_recetasRecomendadas.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Text('No hay sugerencias por ahora', style: sub),
+                    )
+                  else
+                    ..._recetasRecomendadas.map((r) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: Card(
+                          color: (widget.brightness == Brightness.dark)
+                              ? const Color(0xFF1E1E1E)
+                              : Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: SizedBox(
+                                        width: 68,
+                                        height: 68,
+                                        child: r.imagenUrl != null
+                                            ? Image.network(
+                                                r.imagenUrl!,
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (c, e, s) => Icon(
+                                                  Icons.restaurant_rounded,
+                                                  color: widget.seedColor,
+                                                  size: 32,
+                                                ),
+                                              )
+                                            : Center(
+                                                child: Icon(
+                                                  Icons.restaurant_rounded,
+                                                  color: widget.seedColor,
+                                                  size: 32,
+                                                ),
+                                              ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            r.nombre,
+                                            style: body.copyWith(
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            children: [
+                                              Icon(
+                                                Icons.timer_outlined,
+                                                color: widget.seedColor,
+                                                size: 18,
+                                              ),
+                                              const SizedBox(width: 6),
+                                              Text(r.tiempo, style: sub),
+                                              const SizedBox(width: 12),
+                                              Icon(
+                                                Icons.stars_rounded,
+                                                color: widget.seedColor,
+                                                size: 18,
+                                              ),
+                                              const SizedBox(width: 6),
+                                              Text(r.dificultad, style: sub),
+                                            ],
+                                          ),
+                                          if (r.porque != null) ...[
+                                            const SizedBox(height: 6),
+                                            Text(r.porque!, style: sub),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: OutlinedButton(
+                                        onPressed: () =>
+                                            _mostrarIngredientes(r),
+                                        child: const Text('Ingredientes'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: FilledButton.tonal(
+                                        onPressed: () => _mostrarNutricion(r),
+                                        child: const Text(
+                                          'Estimado Nutricional',
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
                 ],
               ),
             ),
@@ -815,20 +1150,255 @@ Grasas: [número] g
     );
   }
 
-  Widget _tipTile(
-    bool isDark,
-    Color seed,
-    TextStyle body,
-    TextStyle sub,
-    IconData icon,
-    String text,
-  ) {
-    return ListTile(
-      leading: Icon(icon, color: seed),
-      title: Text(text, style: body),
-      trailing: const Icon(Icons.chevron_right),
-      dense: true,
-      visualDensity: const VisualDensity(vertical: -2),
+  Future<void> _cargarRecetasRecomendadas() async {
+    if (!mounted) return;
+    setState(() => _cargandoRecetas = true);
+    try {
+      final prompt =
+          'Sugiere 3 recetas saludables y fáciles para hoy en El Salvador, basadas en una dieta balanceada. Para cada una incluye: nombre, tiempo aproximado, dificultad, imagen descriptiva (URL placeholder o descripción), y breve porqué es saludable. ${buildUserPromptPersonalization()}'; // Corregido lint: prefer interpolation
+      final res = await _geminiModel.generateContent([Content.text(prompt)]);
+      final text = res.text?.trim() ?? '';
+      final list = _parseRecetas(text);
+      if (list.isEmpty) {
+        setState(() => _recetasRecomendadas = _mockRecetas());
+      } else {
+        setState(() => _recetasRecomendadas = list);
+      }
+    } catch (_) {
+      setState(() => _recetasRecomendadas = _mockRecetas());
+    } finally {
+      if (mounted) setState(() => _cargandoRecetas = false);
+    }
+  }
+
+  List<_Receta> _parseRecetas(String text) {
+    final out = <_Receta>[];
+    try {
+      final start = text.indexOf('[');
+      final end = text.lastIndexOf(']');
+      if (start != -1 && end != -1 && end > start) {
+        final jsonStr = text.substring(start, end + 1);
+        final data = json.decode(jsonStr);
+        if (data is List) {
+          for (final item in data) {
+            if (item is Map) {
+              final nombre = '${item['nombre'] ?? item['name'] ?? ''}'.trim();
+              final tiempo = '${item['tiempo'] ?? item['time'] ?? ''}'.trim();
+              final dif = '${item['dificultad'] ?? item['difficulty'] ?? ''}'
+                  .trim();
+              final img = '${item['imagen'] ?? item['image'] ?? ''}'.trim();
+              final porque =
+                  '${item['porque'] ?? item['salud'] ?? item['why'] ?? ''}'
+                      .trim();
+              if (nombre.isEmpty) continue;
+              final ingredientesRaw =
+                  item['ingredientes'] ?? item['ingredients'];
+              final ingredientes = <_Ingrediente>[];
+              if (ingredientesRaw is List) {
+                for (final it in ingredientesRaw) {
+                  final n = '$it'.trim();
+                  if (n.isEmpty) continue;
+                  ingredientes.add(_Ingrediente(n, _sugerirTienda(n)));
+                }
+              }
+              final imagenUrl = img.isEmpty ? null : img;
+              out.add(
+                _Receta(
+                  nombre: nombre,
+                  tiempo: tiempo.isEmpty ? '30 min' : tiempo,
+                  dificultad: dif.isEmpty ? 'Fácil' : dif,
+                  imagenUrl: imagenUrl,
+                  imagenDesc: imagenUrl == null
+                      ? (img.isEmpty ? null : img)
+                      : null,
+                  porque: porque.isEmpty ? null : porque,
+                  ingredientes: ingredientes,
+                  nutricion: null,
+                ),
+              );
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  List<_Receta> _mockRecetas() {
+    return [
+      _Receta(
+        nombre: 'Ensalada de Quinoa con Verduras',
+        tiempo: '20 min',
+        dificultad: 'Fácil',
+        imagenUrl: null,
+        imagenDesc: 'Plato con quinoa, tomate, pepino y aguacate',
+        porque: 'Alta en fibra y proteínas vegetales',
+        ingredientes: [
+          _Ingrediente('Quinoa', _sugerirTienda('Quinoa')),
+          _Ingrediente('Tomate', _sugerirTienda('Tomate')),
+          _Ingrediente('Pepino', _sugerirTienda('Pepino')),
+          _Ingrediente('Aguacate', _sugerirTienda('Aguacate')),
+        ],
+        nutricion: _Nutricion(
+          kcal: 380,
+          proteinas: 14,
+          carbohidratos: 50,
+          grasas: 12,
+        ),
+      ),
+      _Receta(
+        nombre: 'Pollo a la Plancha con Ensalada',
+        tiempo: '30 min',
+        dificultad: 'Fácil',
+        imagenUrl: null,
+        imagenDesc: 'Pechuga de pollo con ensalada verde',
+        porque: 'Fuente magra de proteína y vegetales frescos',
+        ingredientes: [
+          _Ingrediente('Pechuga de pollo', _sugerirTienda('Pollo')),
+          _Ingrediente('Lechuga', _sugerirTienda('Lechuga')),
+          _Ingrediente('Tomate', _sugerirTienda('Tomate')),
+          _Ingrediente('Aceite de oliva', _sugerirTienda('Aceite')),
+        ],
+        nutricion: _Nutricion(
+          kcal: 420,
+          proteinas: 35,
+          carbohidratos: 20,
+          grasas: 18,
+        ),
+      ),
+      _Receta(
+        nombre: 'Sopa de Verduras',
+        tiempo: '25 min',
+        dificultad: 'Fácil',
+        imagenUrl: null,
+        imagenDesc: 'Tazón con caldo y verduras variadas',
+        porque: 'Baja en calorías y rica en micronutrientes',
+        ingredientes: [
+          _Ingrediente('Zanahoria', _sugerirTienda('Zanahoria')),
+          _Ingrediente('Papa', _sugerirTienda('Papa')),
+          _Ingrediente('Cebolla', _sugerirTienda('Cebolla')),
+          _Ingrediente('Caldo de pollo', _sugerirTienda('Caldo')),
+        ],
+        nutricion: _Nutricion(
+          kcal: 260,
+          proteinas: 9,
+          carbohidratos: 40,
+          grasas: 6,
+        ),
+      ),
+    ];
+  }
+
+  String _sugerirTienda(String ingrediente) {
+    final i = ingrediente.toLowerCase();
+    if (i.contains('pollo') || i.contains('carne')) {
+      return 'Selectos o Super Selectos';
+    } else if (i.contains('arroz') ||
+        i.contains('aceite') ||
+        i.contains('granos')) {
+      return 'La Despensa Familiar o Walmart';
+    } else if (i.contains('verdura') ||
+        i.contains('tomate') ||
+        i.contains('lechuga') ||
+        i.contains('pepino') ||
+        i.contains('zanahoria') ||
+        i.contains('aguacate')) {
+      return 'Mercado Central o Selectos';
+    } else {
+      return 'Super Selectos o Walmart';
+    }
+  }
+
+  Future<void> _mostrarIngredientes(_Receta r) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Ingredientes'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: r.ingredientes.isNotEmpty
+                  ? r.ingredientes
+                        .map(
+                          (e) => ListTile(
+                            leading: Icon(
+                              Icons.shopping_bag_outlined,
+                              color: widget.seedColor,
+                            ),
+                            title: Text(e.nombre),
+                            subtitle: Text(e.tienda),
+                          ),
+                        )
+                        .toList()
+                  : [
+                      ListTile(
+                        leading: Icon(
+                          Icons.info_outline,
+                          color: widget.seedColor,
+                        ),
+                        title: const Text('Sin ingredientes'),
+                      ),
+                    ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _mostrarNutricion(_Receta r) async {
+    final n =
+        r.nutricion ??
+        _Nutricion(kcal: 400, proteinas: 25, carbohidratos: 40, grasas: 12);
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Estimado nutricional'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: Icon(
+                  Icons.local_fire_department,
+                  color: widget.seedColor,
+                ),
+                title: const Text('Calorías'),
+                trailing: Text('${n.kcal} kcal'),
+              ),
+              ListTile(
+                leading: Icon(Icons.bolt, color: Colors.green),
+                title: const Text('Proteínas'),
+                trailing: Text('${n.proteinas} g'),
+              ),
+              ListTile(
+                leading: Icon(Icons.grain, color: Colors.blue),
+                title: const Text('Carbohidratos'),
+                trailing: Text('${n.carbohidratos} g'),
+              ),
+              ListTile(
+                leading: Icon(Icons.water_drop, color: Colors.orange),
+                title: const Text('Grasas'),
+                trailing: Text('${n.grasas} g'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -2231,8 +2801,12 @@ class _SplashScreenState extends State<SplashScreen>
     _fade = CurvedAnimation(parent: _controller, curve: Curves.easeIn);
     Future.delayed(const Duration(milliseconds: 2200), () {
       if (mounted) {
+        final hasUser = getCurrentUser() != null;
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const VidaPlusApp()),
+          MaterialPageRoute(
+            builder: (_) =>
+                hasUser ? const VidaPlusApp() : const LoginRegisterScreen(),
+          ),
         );
       }
     });
@@ -2288,6 +2862,425 @@ class _SplashScreenState extends State<SplashScreen>
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class LoginRegisterScreen extends StatefulWidget {
+  const LoginRegisterScreen({super.key});
+  @override
+  State<LoginRegisterScreen> createState() => _LoginRegisterScreenState();
+}
+
+class _LoginRegisterScreenState extends State<LoginRegisterScreen>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tab;
+  @override
+  void initState() {
+    super.initState();
+    _tab = TabController(length: 2, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = MediaQuery.of(context).platformBrightness == Brightness.dark;
+    final bg = isDark
+        ? const Color(0xFF121212)
+        : (Colors.grey[50] ?? Colors.white);
+    return Scaffold(
+      backgroundColor: bg,
+      appBar: AppBar(
+        centerTitle: true,
+        title: const Text('Acceso'),
+        bottom: TabBar(
+          controller: _tab,
+          tabs: const [
+            Tab(text: 'Iniciar sesión'),
+            Tab(text: 'Registrarse'),
+          ],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tab,
+        children: const [_LoginForm(), _RegisterForm()],
+      ),
+    );
+  }
+}
+
+class _LoginForm extends StatefulWidget {
+  const _LoginForm();
+  @override
+  State<_LoginForm> createState() => _LoginFormState();
+}
+
+class _LoginFormState extends State<_LoginForm> {
+  final _formKey = GlobalKey<FormState>();
+  final _emailCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  bool _obscure = true;
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _passCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                TextFormField(
+                  controller: _emailCtrl,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Correo',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (v) => (v == null || !v.contains('@'))
+                      ? 'Correo inválido'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _passCtrl,
+                  obscureText: _obscure,
+                  decoration: InputDecoration(
+                    labelText: 'Contraseña',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _obscure ? Icons.visibility : Icons.visibility_off,
+                      ),
+                      onPressed: () => setState(() => _obscure = !_obscure),
+                    ),
+                  ),
+                  validator: (v) =>
+                      (v == null || v.isEmpty) ? 'Ingresa tu contraseña' : null,
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF004D40),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () async {
+                      if (!(_formKey.currentState?.validate() ?? false)) return;
+                      final ok = verifyLogin(
+                        _emailCtrl.text.trim(),
+                        _passCtrl.text,
+                      );
+                      if (!ok) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Correo o contraseña inválidos'),
+                          ),
+                        );
+                        return;
+                      }
+                      if (!mounted) return;
+                      Navigator.of(context).pushReplacement(
+                        MaterialPageRoute(builder: (_) => const VidaPlusApp()),
+                      );
+                    },
+                    child: const Text('Iniciar Sesión'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RegisterForm extends StatefulWidget {
+  const _RegisterForm();
+  @override
+  State<_RegisterForm> createState() => _RegisterFormState();
+}
+
+class _RegisterFormState extends State<_RegisterForm> {
+  final _formKey = GlobalKey<FormState>();
+  final _nombreCtrl = TextEditingController();
+  final _apellidoCtrl = TextEditingController();
+  String? _genero;
+  final _edadCtrl = TextEditingController();
+  final _alturaCtrl = TextEditingController(); // cm
+  final _pesoCtrl = TextEditingController(); // kg
+  final _correoCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  final _pass2Ctrl = TextEditingController();
+  bool _obscure1 = true;
+  bool _obscure2 = true;
+
+  @override
+  void dispose() {
+    _nombreCtrl.dispose();
+    _apellidoCtrl.dispose();
+    _edadCtrl.dispose();
+    _alturaCtrl.dispose();
+    _pesoCtrl.dispose();
+    _correoCtrl.dispose();
+    _passCtrl.dispose();
+    _pass2Ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 520),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _nombreCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Nombre',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (v) => (v == null || v.trim().isEmpty)
+                            ? 'Ingresa tu nombre'
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _apellidoCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Apellido',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (v) => (v == null || v.trim().isEmpty)
+                            ? 'Ingresa tu apellido'
+                            : null,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue:
+                            _genero, // Corregido lint: deprecated value
+                        decoration: const InputDecoration(
+                          labelText: 'Género',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Masculino',
+                            child: Text('Masculino'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Femenino',
+                            child: Text('Femenino'),
+                          ),
+                          DropdownMenuItem(value: 'Otro', child: Text('Otro')),
+                        ],
+                        onChanged: (v) => setState(() => _genero = v),
+                        validator: (v) => (v == null || v.isEmpty)
+                            ? 'Selecciona tu género'
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _edadCtrl,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Edad',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) {
+                            // Corregido lint: curly braces
+                            return 'Ingresa tu edad';
+                          }
+                          final n = int.tryParse(v);
+                          if (n == null || n <= 0) return 'Edad inválida';
+                          return null;
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _alturaCtrl,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Altura (cm)',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) {
+                            // Corregido lint: curly braces
+                            return 'Ingresa tu altura';
+                          }
+                          final n = double.tryParse(v);
+                          if (n == null || n <= 0) return 'Altura inválida';
+                          return null;
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _pesoCtrl,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'Peso (kg)',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (v) {
+                          if (v == null || v.trim().isEmpty) {
+                            // Corregido lint: curly braces
+                            return 'Ingresa tu peso';
+                          }
+                          final n = double.tryParse(v);
+                          if (n == null || n <= 0) return 'Peso inválido';
+                          return null;
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _correoCtrl,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(
+                    labelText: 'Correo',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (v) => (v == null || !v.contains('@'))
+                      ? 'Correo inválido'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _passCtrl,
+                        obscureText: _obscure1,
+                        decoration: InputDecoration(
+                          labelText: 'Contraseña',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscure1
+                                  ? Icons.visibility
+                                  : Icons.visibility_off,
+                            ),
+                            onPressed: () =>
+                                setState(() => _obscure1 = !_obscure1),
+                          ),
+                        ),
+                        validator: (v) => (v == null || v.length < 6)
+                            ? 'Mínimo 6 caracteres'
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _pass2Ctrl,
+                        obscureText: _obscure2,
+                        decoration: InputDecoration(
+                          labelText: 'Confirmar contraseña',
+                          border: const OutlineInputBorder(),
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscure2
+                                  ? Icons.visibility
+                                  : Icons.visibility_off,
+                            ),
+                            onPressed: () =>
+                                setState(() => _obscure2 = !_obscure2),
+                          ),
+                        ),
+                        validator: (v) => (v == null || v != _passCtrl.text)
+                            ? 'No coinciden'
+                            : null,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF004D40),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () async {
+                      if (!(_formKey.currentState?.validate() ?? false)) return;
+                      final u = User(
+                        nombre: _nombreCtrl.text.trim(),
+                        apellido: _apellidoCtrl.text.trim(),
+                        genero: _genero ?? '',
+                        edad: int.tryParse(_edadCtrl.text.trim()) ?? 0,
+                        altura: double.tryParse(_alturaCtrl.text.trim()) ?? 0.0,
+                        peso: double.tryParse(_pesoCtrl.text.trim()) ?? 0.0,
+                        correo: _correoCtrl.text.trim(),
+                        contrasena: _passCtrl.text,
+                      );
+                      final nav = Navigator.of(
+                        context,
+                      ); // Corregido lint: use_build_method
+                      await saveCurrentUser(u);
+                      if (!mounted) return;
+                      nav.pushReplacement(
+                        MaterialPageRoute(builder: (_) => const VidaPlusApp()),
+                      );
+                    },
+                    child: const Text('Registrarse'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -3299,6 +4292,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late Color _seed;
   String? _fontFamily;
   late bool _followLocation;
+  final _alturaCtrl = TextEditingController();
+  final _pesoCtrl = TextEditingController();
   void _emit() {
     final cb = widget.onChanged;
     if (cb != null) {
@@ -3329,6 +4324,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _seed = widget.seed;
     _fontFamily = widget.fontFamily;
     _followLocation = widget.followLocation;
+    final u = getCurrentUser();
+    _alturaCtrl.text = u?.altura.toString() ?? '';
+    _pesoCtrl.text = u?.peso.toString() ?? '';
+  }
+
+  @override
+  void dispose() {
+    _alturaCtrl.dispose();
+    _pesoCtrl.dispose();
+    super.dispose();
   }
 
   @override
@@ -3512,47 +4517,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
                         const Divider(height: 1),
-                        Tooltip(
-                          message: 'Usa la app sin conexión',
-                          child: SwitchListTile(
-                            title: Text(
-                              'Modo offline',
-                              style: TextStyle(color: bodyColor),
-                            ),
-                            subtitle: Text(
-                              'Usar datos locales cuando no haya conexión',
-                              style: TextStyle(fontSize: 14, color: subColor),
-                            ),
-                            value: false,
-                            onChanged: (_) {},
-                          ),
-                        ),
-                        const Divider(height: 1),
-                        ListTile(
-                          leading: Icon(
-                            Icons.volume_up,
-                            color: isDark ? _seed.withAlpha(230) : _seed,
-                          ),
-                          title: Text(
-                            'Volumen de notificaciones',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                              color: headingColor,
-                            ),
-                          ),
-                          subtitle: Tooltip(
-                            message: 'Ajusta el volumen de avisos',
-                            child: Slider(
-                              value: 0.5,
-                              onChanged: (_) {},
-                              min: 0,
-                              max: 1,
-                              divisions: 5,
-                              label: '50%',
-                            ),
-                          ),
-                        ),
                       ],
                     ),
                   ),
@@ -3607,6 +4571,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         selected: {_brightness},
                         onSelectionChanged: (s) {
                           setState(() => _brightness = s.first);
+                          final u = getCurrentUser();
+                          if (u != null) {
+                            final updated = User(
+                              nombre: u.nombre,
+                              apellido: u.apellido,
+                              genero: u.genero,
+                              edad: u.edad,
+                              altura: u.altura,
+                              peso: u.peso,
+                              correo: u.correo,
+                              contrasena: u.contrasena,
+                              brightness: _brightness == Brightness.dark
+                                  ? 'dark'
+                                  : 'light',
+                              seedColor: u.seedColor,
+                              fontFamily: u.fontFamily,
+                              followLocation: u.followLocation,
+                            );
+                            saveCurrentUser(updated);
+                          }
                           _emit();
                         },
                         style: segmentedStyle,
@@ -3678,6 +4662,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                       customBorder: const CircleBorder(),
                                       onTap: () {
                                         setState(() => _seed = e.value);
+                                        final u = getCurrentUser();
+                                        if (u != null) {
+                                          final updated = User(
+                                            nombre: u.nombre,
+                                            apellido: u.apellido,
+                                            genero: u.genero,
+                                            edad: u.edad,
+                                            altura: u.altura,
+                                            peso: u.peso,
+                                            correo: u.correo,
+                                            contrasena: u.contrasena,
+                                            brightness: u.brightness,
+                                            seedColor: _seed.toARGB32(),
+                                            fontFamily: u.fontFamily,
+                                            followLocation: u.followLocation,
+                                          );
+                                          saveCurrentUser(updated);
+                                        }
                                         _emit();
                                       },
                                       child: AnimatedScale(
@@ -3755,9 +4757,106 @@ class _SettingsScreenState extends State<SettingsScreen> {
             SizedBox(height: vspace),
             Row(
               children: [
-                Icon(Icons.person, color: sectionHeaderColor),
+                Icon(Icons.badge, color: sectionHeaderColor),
                 const SizedBox(width: 8),
-                Text('Cuenta', style: sectionTitleStyle),
+                Text('Datos personales', style: sectionTitleStyle),
+              ],
+            ),
+            Card(
+              margin: const EdgeInsets.symmetric(vertical: 10),
+              elevation: 3,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(20),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  decoration: gradientCardDecoration(),
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _alturaCtrl,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Altura (cm)',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: TextField(
+                              controller: _pesoCtrl,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Peso (kg)',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 44,
+                        child: FilledButton(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: _seed,
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () async {
+                            final messenger = ScaffoldMessenger.of(context);
+                            final a = double.tryParse(_alturaCtrl.text.trim());
+                            final p = double.tryParse(_pesoCtrl.text.trim());
+                            if (a == null || a <= 0 || p == null || p <= 0) {
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                  content: Text('Valores inválidos'),
+                                ),
+                              );
+                              return;
+                            }
+                            final u = getCurrentUser();
+                            if (u != null) {
+                              final updated = User(
+                                nombre: u.nombre,
+                                apellido: u.apellido,
+                                genero: u.genero,
+                                edad: u.edad,
+                                altura: a,
+                                peso: p,
+                                correo: u.correo,
+                                contrasena: u.contrasena,
+                              );
+                              await saveCurrentUser(updated);
+                              if (!mounted) return;
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                  content: Text('Datos actualizados'),
+                                ),
+                              );
+                            }
+                          },
+                          child: const Text('Guardar'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: vspace),
+            Row(
+              children: [
+                Icon(Icons.security, color: sectionHeaderColor),
+                const SizedBox(width: 8),
+                Text('Seguridad', style: sectionTitleStyle),
               ],
             ),
             Card(
@@ -3775,45 +4874,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Column(
                     children: [
                       ListTile(
-                        leading: CircleAvatar(
-                          radius: 22,
-                          backgroundColor: saturateColor(
-                            _seed,
-                            0.1,
-                          ).withAlpha(isDark ? 200 : 220),
-                          child: const Icon(
-                            Icons.person,
-                            color: Colors.white,
-                            size: 26,
-                          ),
-                        ),
-                        title: Text(
-                          'Nombre: Javier',
-                          style: TextStyle(color: bodyColor),
-                        ),
-                        subtitle: Text(
-                          'Editar perfil',
-                          style: TextStyle(fontSize: 14, color: subColor),
-                        ),
-                        trailing: const Icon(Icons.edit, size: 22),
-                        onTap: () {},
-                      ),
-                      const Divider(height: 1),
-                      ListTile(
-                        leading: Icon(
-                          Icons.email_outlined,
-                          color: isDark ? subColor : _seed,
-                          size: 26,
-                        ),
-                        title: Text(
-                          'Correo: ejemplo@vidasaludable.com',
-                          style: TextStyle(color: bodyColor),
-                        ),
-                        trailing: const Icon(Icons.email, size: 22),
-                        onTap: () {},
-                      ),
-                      const Divider(height: 1),
-                      ListTile(
                         leading: Icon(
                           Icons.lock_outline,
                           color: isDark ? subColor : _seed,
@@ -3821,10 +4881,107 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         title: Text(
                           'Cambiar contraseña',
-                          style: TextStyle(color: subColor),
+                          style: TextStyle(color: bodyColor),
                         ),
-                        trailing: const Icon(Icons.lock, size: 22),
-                        onTap: () {},
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          final currentCtrl = TextEditingController();
+                          final newCtrl = TextEditingController();
+                          final confirmCtrl = TextEditingController();
+                          final res = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) {
+                              return AlertDialog(
+                                backgroundColor: isDark
+                                    ? const Color(0xFF1E1E1E)
+                                    : null,
+                                title: const Text('Cambiar contraseña'),
+                                content: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    TextField(
+                                      controller: currentCtrl,
+                                      obscureText: true,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Ingresa contraseña actual',
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    TextField(
+                                      controller: newCtrl,
+                                      obscureText: true,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Nueva contraseña',
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    TextField(
+                                      controller: confirmCtrl,
+                                      obscureText: true,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Confirmar',
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        Navigator.of(ctx).pop(false),
+                                    child: const Text('Cancelar'),
+                                  ),
+                                  FilledButton(
+                                    onPressed: () =>
+                                        Navigator.of(ctx).pop(true),
+                                    child: const Text('Guardar'),
+                                  ),
+                                ],
+                              );
+                            },
+                          );
+                          if (res == true) {
+                            final u = getCurrentUser();
+                            if (u == null) return;
+                            if (currentCtrl.text != u.contrasena) {
+                              if (!mounted) return;
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                  content: Text('Contraseña actual incorrecta'),
+                                ),
+                              );
+                              return;
+                            }
+                            if (newCtrl.text.isEmpty ||
+                                newCtrl.text.length < 6 ||
+                                newCtrl.text != confirmCtrl.text) {
+                              if (!mounted) return;
+                              messenger.showSnackBar(
+                                const SnackBar(
+                                  content: Text('Nueva/confirmación inválida'),
+                                ),
+                              );
+                              return;
+                            }
+                            final updated = User(
+                              nombre: u.nombre,
+                              apellido: u.apellido,
+                              genero: u.genero,
+                              edad: u.edad,
+                              altura: u.altura,
+                              peso: u.peso,
+                              correo: u.correo,
+                              contrasena: newCtrl.text,
+                            );
+                            await saveCurrentUser(updated);
+                            if (!mounted) return;
+                            messenger.showSnackBar(
+                              const SnackBar(
+                                content: Text('Contraseña actualizada'),
+                              ),
+                            );
+                          }
+                        },
                       ),
                       const Divider(height: 1),
                       ListTile(
@@ -3845,7 +5002,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           color: Colors.redAccent,
                           size: 22,
                         ),
-                        onTap: () {},
+                        onTap: () async {
+                          final nav = Navigator.of(context);
+                          await _userBox.delete('currentUserEmail');
+                          if (!mounted) return;
+                          nav.pushAndRemoveUntil(
+                            MaterialPageRoute(
+                              builder: (_) => const LoginRegisterScreen(),
+                            ),
+                            (route) => false,
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -4116,6 +5283,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ? null
                                 : 'serif',
                           );
+                          final u = getCurrentUser();
+                          if (u != null) {
+                            final updated = User(
+                              nombre: u.nombre,
+                              apellido: u.apellido,
+                              genero: u.genero,
+                              edad: u.edad,
+                              altura: u.altura,
+                              peso: u.peso,
+                              correo: u.correo,
+                              contrasena: u.contrasena,
+                              brightness: u.brightness,
+                              seedColor: u.seedColor,
+                              fontFamily: _fontFamily,
+                              followLocation: u.followLocation,
+                            );
+                            saveCurrentUser(updated);
+                          }
                           _emit();
                         },
                         style: segmentedStyle,
