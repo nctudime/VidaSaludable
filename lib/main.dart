@@ -8,7 +8,6 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 // Reemplazado activity_recognition_flutter por geolocator + sensors_plus (AGP 8+)
@@ -22,10 +21,20 @@ import 'package:hive_flutter/hive_flutter.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Hive.initFlutter();
-  await Hive.openBox('userBox');
+  await Hive.openBox('users');
+  await Hive.openBox('user_settings');
+  await Hive.openBox('daily_exercise');
+  await Hive.openBox('hydration_logs');
+  await Hive.openBox('daily_hydration_summary');
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const MyApp());
 }
+
+int colorToArgb(Color c) =>
+    ((c.a * 255).round() << 24) |
+    ((c.r * 255).round() << 16) |
+    ((c.g * 255).round() << 8) |
+    (c.b * 255).round();
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -115,15 +124,19 @@ class User {
   }
 }
 
-Box get _userBox => Hive.box('userBox');
+Box get _usersBox => Hive.box('users');
+Box get _userSettingsBox => Hive.box('user_settings');
+Box get _dailyExerciseBox => Hive.box('daily_exercise');
+Box get _hydrationLogsBox => Hive.box('hydration_logs');
+Box get _hydrationSummaryBox => Hive.box('daily_hydration_summary');
 String? getCurrentUserEmail() {
-  final v = _userBox.get('currentUserEmail');
+  final v = _usersBox.get('currentUserEmail');
   if (v is String && v.isNotEmpty) return v;
   return null;
 }
 
 User? getUserByEmail(String correo) {
-  final raw = _userBox.get('user:$correo');
+  final raw = _usersBox.get('user:$correo');
   if (raw is Map) return User.fromMap(raw);
   return null;
 }
@@ -135,14 +148,123 @@ User? getCurrentUser() {
 }
 
 Future<void> saveCurrentUser(User u) async {
-  await _userBox.put('user:${u.correo}', u.toMap());
-  await _userBox.put('currentUserEmail', u.correo);
+  await _usersBox.put('user:${u.correo}', u.toMap());
+  await _usersBox.put('currentUserEmail', u.correo);
 }
 
 bool verifyLogin(String correo, String contrasena) {
   final u = getUserByEmail(correo.trim().toLowerCase());
   if (u == null) return false;
   return u.contrasena == contrasena;
+}
+
+class UserSettings {
+  final String userId;
+  final String? brightness;
+  final int? seedColor;
+  final String? fontFamily;
+  final bool? followLocation;
+  final double? metaHydratationMl;
+  const UserSettings({
+    required this.userId,
+    this.brightness,
+    this.seedColor,
+    this.fontFamily,
+    this.followLocation,
+    this.metaHydratationMl,
+  });
+  Map<String, dynamic> toMap() => {
+    'userId': userId,
+    'brightness': brightness,
+    'seedColor': seedColor,
+    'fontFamily': fontFamily,
+    'followLocation': followLocation,
+    'metaHydratationMl': metaHydratationMl,
+  };
+  factory UserSettings.fromMap(Map map) => UserSettings(
+    userId: '${map['userId'] ?? ''}',
+    brightness: map['brightness'] == null ? null : '${map['brightness']}',
+    seedColor: (map['seedColor'] is int)
+        ? map['seedColor']
+        : int.tryParse('${map['seedColor'] ?? ''}'),
+    fontFamily: map['fontFamily'] == null ? null : '${map['fontFamily']}',
+    followLocation: map['followLocation'] == null
+        ? null
+        : (map['followLocation'] is bool
+              ? map['followLocation']
+              : '${map['followLocation']}' == 'true'),
+    metaHydratationMl: (map['metaHydratationMl'] is double)
+        ? map['metaHydratationMl']
+        : double.tryParse('${map['metaHydratationMl'] ?? ''}'),
+  );
+}
+
+double computeDailyHydrationGoalMl(User u) {
+  final base = (u.peso > 0 ? u.peso : 70.0) * 35.0;
+  double adj = base;
+  if (u.edad > 0 && u.edad < 14) adj = base * 0.9;
+  if (u.edad >= 65) adj = base * 0.95;
+  if (u.genero.toLowerCase() == 'masculino') adj += 200;
+  return adj.clamp(1200.0, 4500.0);
+}
+
+UserSettings? getSettingsForUser(String userId) {
+  final raw = _userSettingsBox.get('settings:$userId');
+  if (raw is Map) return UserSettings.fromMap(raw);
+  return null;
+}
+
+Future<void> saveSettings(UserSettings s) async {
+  await _userSettingsBox.put('settings:${s.userId}', s.toMap());
+}
+
+String _dateKey(DateTime d) =>
+    '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+Future<void> addHydrationMl(String userId, double ml) async {
+  final today = _dateKey(DateTime.now());
+  final logKey = '${userId}_$today';
+  final list = (_hydrationLogsBox.get(logKey) as List?)?.cast<Map>() ?? <Map>[];
+  list.add({'ts': DateTime.now().millisecondsSinceEpoch, 'ml': ml});
+  await _hydrationLogsBox.put(logKey, list);
+  final u = getUserByEmail(userId);
+  final settings =
+      getSettingsForUser(userId) ??
+      UserSettings(
+        userId: userId,
+        metaHydratationMl: computeDailyHydrationGoalMl(
+          u ??
+              User(
+                nombre: '',
+                apellido: '',
+                genero: '',
+                edad: 0,
+                altura: 0,
+                peso: 70,
+                correo: userId,
+                contrasena: '',
+              ),
+        ),
+      );
+  final summaryKey = '${userId}_$today';
+  final raw = _hydrationSummaryBox.get(summaryKey);
+  double total = 0.0;
+  if (raw is Map) {
+    total = (raw['total_ml'] is double)
+        ? raw['total_ml']
+        : double.tryParse('${raw['total_ml'] ?? 0}') ?? 0.0;
+  }
+  total += ml;
+  final meta = settings.metaHydratationMl ?? computeDailyHydrationGoalMl(u!);
+  final pct = ((total / meta) * 100).clamp(0, 100);
+  await _hydrationSummaryBox.put(summaryKey, {
+    'userId': userId,
+    'date': today,
+    'total_ml': total,
+    'meta_ml': meta,
+    'percentage': pct,
+    'updatedAt': DateTime.now().millisecondsSinceEpoch,
+  });
 }
 
 String buildUserPromptPersonalization() {
@@ -168,12 +290,11 @@ class _Receta {
     required this.nombre,
     required this.tiempo,
     required this.dificultad,
-    this.imagenUrl,
-    this.imagenDesc,
     this.porque,
     required this.ingredientes,
     this.nutricion,
-  });
+  }) : imagenUrl = null,
+       imagenDesc = null;
 }
 
 class _Ingrediente {
@@ -212,16 +333,17 @@ class _VidaPlusAppState extends State<VidaPlusApp> {
     super.initState();
     final u = getCurrentUser();
     if (u != null) {
-      if ('${u.brightness}' == 'dark') {
+      final s = getSettingsForUser(u.correo);
+      if ('${s?.brightness}' == 'dark') {
         _brightness = Brightness.dark;
-      } else if ('${u.brightness}' == 'light') {
+      } else if ('${s?.brightness}' == 'light') {
         _brightness = Brightness.light;
       }
-      if (u.seedColor is int) {
-        _seedColor = Color(u.seedColor!);
+      if (s?.seedColor is int) {
+        _seedColor = Color(s!.seedColor!);
       }
-      _fontFamily = u.fontFamily;
-      _followLocation = u.followLocation ?? false;
+      _fontFamily = s?.fontFamily;
+      _followLocation = s?.followLocation ?? false;
     }
   }
 
@@ -364,7 +486,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Clave API real – NUNCA la subas a GitHub. Usa .env o constante segura en producción.
     // Genera nueva en https://aistudio.google.com/app/apikey si esta falla.
-    const apiKey = 'AIzaSyAey5Jvw0-qUh50GYh2bOBZ8z7YWbQXEdk';
+    const apiKey = 'AIzaSyCEwgwToG9cfPvf2wzNHGOhSeXCLafD1ms';
 
     // Inicializa el modelo de Gemini
     _geminiModel = GenerativeModel(
@@ -1027,7 +1149,10 @@ ${buildUserPromptPersonalization()}
                   else if (_recetasRecomendadas.isEmpty)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Text('No hay sugerencias por ahora', style: sub),
+                      child: Text(
+                        'No se pudieron generar recetas. Intenta de nuevo.',
+                        style: sub,
+                      ),
                     )
                   else
                     ..._recetasRecomendadas.map((r) {
@@ -1126,6 +1251,13 @@ ${buildUserPromptPersonalization()}
                                     ),
                                     const SizedBox(width: 10),
                                     Expanded(
+                                      child: OutlinedButton(
+                                        onPressed: () => _mostrarPasos(r),
+                                        child: const Text('Pasos'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
                                       child: FilledButton.tonal(
                                         onPressed: () => _mostrarNutricion(r),
                                         child: const Text(
@@ -1154,18 +1286,23 @@ ${buildUserPromptPersonalization()}
     if (!mounted) return;
     setState(() => _cargandoRecetas = true);
     try {
+      final u = getCurrentUser();
+      final genero = u?.genero ?? 'no especificado';
+      final edad = u?.edad ?? 0;
+      final altura = u?.altura ?? 0.0;
+      final peso = u?.peso ?? 0.0;
       final prompt =
-          'Sugiere 3 recetas saludables y fáciles para hoy en El Salvador, basadas en una dieta balanceada. Para cada una incluye: nombre, tiempo aproximado, dificultad, imagen descriptiva (URL placeholder o descripción), y breve porqué es saludable. ${buildUserPromptPersonalization()}'; // Corregido lint: prefer interpolation
+          'Sugiere 3 recetas saludables y variadas para hoy en El Salvador, basadas en una dieta balanceada para un usuario de género '
+          '$genero, $edad años, $altura cm y $peso kg. Para cada receta incluye: nombre, tiempo aproximado, dificultad, breve porqué es saludable, '
+          'lista de ingredientes (solo nombres y cantidades, sin tiendas), y estimado nutricional aproximado (kcal, proteínas, carbohidratos, grasas). '
+          'Responde SOLO en formato JSON array con claves: nombre, tiempo, dificultad, razonSaludable, ingredientes (array de strings), '
+          'nutricional (objeto con kcal, proteinas, carbohidratos, grasas).';
       final res = await _geminiModel.generateContent([Content.text(prompt)]);
       final text = res.text?.trim() ?? '';
       final list = _parseRecetas(text);
-      if (list.isEmpty) {
-        setState(() => _recetasRecomendadas = _mockRecetas());
-      } else {
-        setState(() => _recetasRecomendadas = list);
-      }
+      setState(() => _recetasRecomendadas = list);
     } catch (_) {
-      setState(() => _recetasRecomendadas = _mockRecetas());
+      setState(() => _recetasRecomendadas = []);
     } finally {
       if (mounted) setState(() => _cargandoRecetas = false);
     }
@@ -1174,49 +1311,80 @@ ${buildUserPromptPersonalization()}
   List<_Receta> _parseRecetas(String text) {
     final out = <_Receta>[];
     try {
-      final start = text.indexOf('[');
-      final end = text.lastIndexOf(']');
-      if (start != -1 && end != -1 && end > start) {
-        final jsonStr = text.substring(start, end + 1);
-        final data = json.decode(jsonStr);
-        if (data is List) {
-          for (final item in data) {
-            if (item is Map) {
-              final nombre = '${item['nombre'] ?? item['name'] ?? ''}'.trim();
-              final tiempo = '${item['tiempo'] ?? item['time'] ?? ''}'.trim();
-              final dif = '${item['dificultad'] ?? item['difficulty'] ?? ''}'
-                  .trim();
-              final img = '${item['imagen'] ?? item['image'] ?? ''}'.trim();
-              final porque =
-                  '${item['porque'] ?? item['salud'] ?? item['why'] ?? ''}'
-                      .trim();
-              if (nombre.isEmpty) continue;
-              final ingredientesRaw =
-                  item['ingredientes'] ?? item['ingredients'];
-              final ingredientes = <_Ingrediente>[];
-              if (ingredientesRaw is List) {
-                for (final it in ingredientesRaw) {
-                  final n = '$it'.trim();
-                  if (n.isEmpty) continue;
-                  ingredientes.add(_Ingrediente(n, _sugerirTienda(n)));
-                }
+      // Primero intenta decodificar JSON completo
+      dynamic data;
+      try {
+        data = json.decode(text);
+      } catch (_) {
+        // Si no es JSON puro, intenta extraer el array JSON
+        final start = text.indexOf('[');
+        final end = text.lastIndexOf(']');
+        if (start != -1 && end != -1 && end > start) {
+          final jsonStr = text.substring(start, end + 1);
+          data = json.decode(jsonStr);
+        }
+      }
+      if (data is List) {
+        for (final item in data) {
+          if (item is Map) {
+            final nombre = '${item['nombre'] ?? item['name'] ?? ''}'.trim();
+            final tiempo = '${item['tiempo'] ?? item['time'] ?? ''}'.trim();
+            final dif = '${item['dificultad'] ?? item['difficulty'] ?? ''}'
+                .trim();
+            final porque =
+                '${item['razonSaludable'] ?? item['porque'] ?? item['salud'] ?? item['why'] ?? ''}'
+                    .trim();
+            if (nombre.isEmpty) continue;
+            final ingredientesRaw = item['ingredientes'] ?? item['ingredients'];
+            final ingredientes = <_Ingrediente>[];
+            if (ingredientesRaw is List) {
+              for (final it in ingredientesRaw) {
+                var n = '$it'.trim();
+                if (n.isEmpty) continue;
+                n = n
+                    .replaceAll(RegExp(r'^\{?\s*item\s*:\s*'), '')
+                    .replaceAll(RegExp(r'^\{?\s*nombre\s*:\s*'), '')
+                    .replaceAll(RegExp(r'^\{?\s*cantidad\s*:\s*'), '')
+                    .replaceAll(RegExp(r'^\{'), '')
+                    .replaceAll(RegExp(r'\}$'), '')
+                    .replaceAll('"', '')
+                    .trim();
+                ingredientes.add(_Ingrediente(n, ''));
               }
-              final imagenUrl = img.isEmpty ? null : img;
-              out.add(
-                _Receta(
-                  nombre: nombre,
-                  tiempo: tiempo.isEmpty ? '30 min' : tiempo,
-                  dificultad: dif.isEmpty ? 'Fácil' : dif,
-                  imagenUrl: imagenUrl,
-                  imagenDesc: imagenUrl == null
-                      ? (img.isEmpty ? null : img)
-                      : null,
-                  porque: porque.isEmpty ? null : porque,
-                  ingredientes: ingredientes,
-                  nutricion: null,
-                ),
+            }
+            _Nutricion? nutr;
+            final nutRaw =
+                item['nutricional'] ?? item['nutricion'] ?? item['nutrition'];
+            if (nutRaw is Map) {
+              nutr = _Nutricion(
+                kcal: int.tryParse('${nutRaw['kcal'] ?? 0}') ?? 0,
+                proteinas:
+                    double.tryParse(
+                      '${nutRaw['proteinas'] ?? nutRaw['protein'] ?? 0}',
+                    ) ??
+                    0.0,
+                carbohidratos:
+                    double.tryParse(
+                      '${nutRaw['carbohidratos'] ?? nutRaw['carbs'] ?? 0}',
+                    ) ??
+                    0.0,
+                grasas:
+                    double.tryParse(
+                      '${nutRaw['grasas'] ?? nutRaw['fat'] ?? 0}',
+                    ) ??
+                    0.0,
               );
             }
+            out.add(
+              _Receta(
+                nombre: nombre,
+                tiempo: tiempo.isEmpty ? '30 min' : tiempo,
+                dificultad: dif.isEmpty ? 'Fácil' : dif,
+                porque: porque.isEmpty ? null : porque,
+                ingredientes: ingredientes,
+                nutricion: nutr,
+              ),
+            );
           }
         }
       }
@@ -1224,90 +1392,9 @@ ${buildUserPromptPersonalization()}
     return out;
   }
 
-  List<_Receta> _mockRecetas() {
-    return [
-      _Receta(
-        nombre: 'Ensalada de Quinoa con Verduras',
-        tiempo: '20 min',
-        dificultad: 'Fácil',
-        imagenUrl: null,
-        imagenDesc: 'Plato con quinoa, tomate, pepino y aguacate',
-        porque: 'Alta en fibra y proteínas vegetales',
-        ingredientes: [
-          _Ingrediente('Quinoa', _sugerirTienda('Quinoa')),
-          _Ingrediente('Tomate', _sugerirTienda('Tomate')),
-          _Ingrediente('Pepino', _sugerirTienda('Pepino')),
-          _Ingrediente('Aguacate', _sugerirTienda('Aguacate')),
-        ],
-        nutricion: _Nutricion(
-          kcal: 380,
-          proteinas: 14,
-          carbohidratos: 50,
-          grasas: 12,
-        ),
-      ),
-      _Receta(
-        nombre: 'Pollo a la Plancha con Ensalada',
-        tiempo: '30 min',
-        dificultad: 'Fácil',
-        imagenUrl: null,
-        imagenDesc: 'Pechuga de pollo con ensalada verde',
-        porque: 'Fuente magra de proteína y vegetales frescos',
-        ingredientes: [
-          _Ingrediente('Pechuga de pollo', _sugerirTienda('Pollo')),
-          _Ingrediente('Lechuga', _sugerirTienda('Lechuga')),
-          _Ingrediente('Tomate', _sugerirTienda('Tomate')),
-          _Ingrediente('Aceite de oliva', _sugerirTienda('Aceite')),
-        ],
-        nutricion: _Nutricion(
-          kcal: 420,
-          proteinas: 35,
-          carbohidratos: 20,
-          grasas: 18,
-        ),
-      ),
-      _Receta(
-        nombre: 'Sopa de Verduras',
-        tiempo: '25 min',
-        dificultad: 'Fácil',
-        imagenUrl: null,
-        imagenDesc: 'Tazón con caldo y verduras variadas',
-        porque: 'Baja en calorías y rica en micronutrientes',
-        ingredientes: [
-          _Ingrediente('Zanahoria', _sugerirTienda('Zanahoria')),
-          _Ingrediente('Papa', _sugerirTienda('Papa')),
-          _Ingrediente('Cebolla', _sugerirTienda('Cebolla')),
-          _Ingrediente('Caldo de pollo', _sugerirTienda('Caldo')),
-        ],
-        nutricion: _Nutricion(
-          kcal: 260,
-          proteinas: 9,
-          carbohidratos: 40,
-          grasas: 6,
-        ),
-      ),
-    ];
-  }
+  // mock de recetas eliminado: se usa solo resultados reales o mensaje vacío
 
-  String _sugerirTienda(String ingrediente) {
-    final i = ingrediente.toLowerCase();
-    if (i.contains('pollo') || i.contains('carne')) {
-      return 'Selectos o Super Selectos';
-    } else if (i.contains('arroz') ||
-        i.contains('aceite') ||
-        i.contains('granos')) {
-      return 'La Despensa Familiar o Walmart';
-    } else if (i.contains('verdura') ||
-        i.contains('tomate') ||
-        i.contains('lechuga') ||
-        i.contains('pepino') ||
-        i.contains('zanahoria') ||
-        i.contains('aguacate')) {
-      return 'Mercado Central o Selectos';
-    } else {
-      return 'Super Selectos o Walmart';
-    }
-  }
+  // _sugerirTienda eliminado por no uso
 
   Future<void> _mostrarIngredientes(_Receta r) async {
     await showDialog<void>(
@@ -1324,11 +1411,10 @@ ${buildUserPromptPersonalization()}
                         .map(
                           (e) => ListTile(
                             leading: Icon(
-                              Icons.shopping_bag_outlined,
+                              Icons.check_circle_outline,
                               color: widget.seedColor,
                             ),
                             title: Text(e.nombre),
-                            subtitle: Text(e.tienda),
                           ),
                         )
                         .toList()
@@ -1349,6 +1435,84 @@ ${buildUserPromptPersonalization()}
               child: const Text('Cerrar'),
             ),
           ],
+        );
+      },
+    );
+  }
+
+  Future<void> _mostrarPasos(_Receta r) async {
+    final u = getCurrentUser();
+    final genero = u?.genero ?? 'no especificado';
+    final edad = u?.edad ?? 0;
+    final prompt =
+        "Genera los pasos detallados de la receta '${r.nombre}' para $genero, $edad años. Incluye 5-8 pasos claros y fáciles.";
+    String contenido = '';
+    bool loading = true;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        Future.microtask(() async {
+          try {
+            final res = await _geminiModel.generateContent([
+              Content.text(prompt),
+            ]);
+            final text = res.text?.trim() ?? '';
+            final lines = text
+                .split('\n')
+                .map((l) => l.trim())
+                .where((l) => l.isNotEmpty)
+                .toList();
+            contenido = lines.join('\n');
+          } catch (_) {
+            contenido = 'No se pudieron generar los pasos. Intenta de nuevo.';
+          } finally {
+            loading = false;
+            // ignore: use_build_context_synchronously
+            (context as Element).markNeedsBuild();
+          }
+        });
+        return StatefulBuilder(
+          builder: (context, setSt) {
+            return AlertDialog(
+              title: const Text('Pasos de la receta'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: loading
+                    ? Center(
+                        child: SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 3,
+                            color: widget.seedColor,
+                          ),
+                        ),
+                      )
+                    : ListView(
+                        shrinkWrap: true,
+                        children: contenido
+                            .split('\n')
+                            .map(
+                              (l) => ListTile(
+                                leading: Icon(
+                                  Icons.checklist_rtl,
+                                  color: widget.seedColor,
+                                ),
+                                title: Text(l),
+                              ),
+                            )
+                            .toList(),
+                      ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cerrar'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -1495,7 +1659,6 @@ class _ExerciseScreenState extends State<ExerciseScreen>
   String _lastDate = '';
   int _stepBuffer = 0;
   DateTime _lastStepTs = DateTime.now().subtract(const Duration(seconds: 2));
-  bool _cardioExpanded = false;
   final List<FlSpot> _cardioSpots = [];
   late final AnimationController _fadeCtrl;
 
@@ -1520,44 +1683,57 @@ class _ExerciseScreenState extends State<ExerciseScreen>
   }
 
   Future<void> _loadPersisted() async {
-    final prefs = await SharedPreferences.getInstance();
-    final today = DateTime.now();
-    final todayStr =
-        '${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
-    final savedDate = prefs.getString('last_date') ?? todayStr;
-    if (savedDate != todayStr) {
-      await prefs.setInt('daily_steps', 0);
-      await prefs.setString('last_date', todayStr);
+    final u = getCurrentUser();
+    if (u == null) return;
+    final todayStr = _dateKey(DateTime.now());
+    final key = '${u.correo}_$todayStr';
+    final raw = _dailyExerciseBox.get(key);
+    if (raw is Map) {
       setState(() {
-        _dailySteps = 0;
+        _dailySteps = (raw['steps'] is int)
+            ? raw['steps']
+            : int.tryParse('${raw['steps'] ?? 0}') ?? 0;
         _lastDate = todayStr;
       });
     } else {
+      await _dailyExerciseBox.put(key, {
+        'userId': u.correo,
+        'date': todayStr,
+        'steps': 0,
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      });
       setState(() {
-        _dailySteps = prefs.getInt('daily_steps') ?? 0;
-        _lastDate = savedDate;
+        _dailySteps = 0;
+        _lastDate = todayStr;
       });
     }
   }
 
   Future<void> _persistSteps() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('daily_steps', _dailySteps);
-    if (_lastDate.isNotEmpty) {
-      await prefs.setString('last_date', _lastDate);
-    }
+    final u = getCurrentUser();
+    if (u == null || _lastDate.isEmpty) return;
+    final key = '${u.correo}_$_lastDate';
+    await _dailyExerciseBox.put(key, {
+      'userId': u.correo,
+      'date': _lastDate,
+      'steps': _dailySteps,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    });
   }
 
   Future<void> _appendLog(String type, int delta) async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList('activity_logs') ?? <String>[];
-    final entry = jsonEncode({
-      'timestamp': DateTime.now().toIso8601String(),
+    final u = getCurrentUser();
+    if (u == null) return;
+    final list =
+        (_dailyExerciseBox.get('exercise_logs:${u.correo}') as List?)
+            ?.cast<Map>() ??
+        <Map>[];
+    list.add({
+      'ts': DateTime.now().millisecondsSinceEpoch,
       'type': type,
       'steps_delta': delta,
     });
-    raw.add(entry);
-    await prefs.setStringList('activity_logs', raw);
+    await _dailyExerciseBox.put('exercise_logs:${u.correo}', list);
   }
 
   Future<void> _ensurePermissionAndStart() async {
@@ -1634,11 +1810,11 @@ class _ExerciseScreenState extends State<ExerciseScreen>
     ActivityKind inferred = _currentKind;
     if (_speedKmh > 15.0) {
       inferred = ActivityKind.vehicle;
-    } else if (_speedKmh < 1.0) {
+    } else if (_speedKmh < 0.5) {
       inferred = ActivityKind.stationary;
-    } else if (_speedKmh < 6.0 && mag > 1.2) {
+    } else if (_speedKmh < 6.0 && mag > 0.9) {
       inferred = ActivityKind.walking;
-    } else if (_speedKmh < 12.0 && mag > 1.6) {
+    } else if (_speedKmh < 12.0 && mag > 1.4) {
       inferred = ActivityKind.running;
     }
 
@@ -1652,9 +1828,11 @@ class _ExerciseScreenState extends State<ExerciseScreen>
         _currentKind != ActivityKind.running) {
       return;
     }
-    final threshold = _currentKind == ActivityKind.running ? 1.6 : 1.2;
+    final threshold = _currentKind == ActivityKind.running ? 1.4 : 0.9;
     final now = DateTime.now();
-    if (mag > threshold && now.difference(_lastStepTs).inMilliseconds > 350) {
+    final debounceMs = _speedKmh < 2.0 ? 450 : 320;
+    if (mag > threshold &&
+        now.difference(_lastStepTs).inMilliseconds > debounceMs) {
       _lastStepTs = now;
       final next = _dailySteps + 1;
       final deltaBucket = _stepBuffer + 1;
@@ -1695,15 +1873,23 @@ class _ExerciseScreenState extends State<ExerciseScreen>
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
         colors: [
-          widget.seedColor.withAlpha(isDark ? 28 : 36),
-          widget.seedColor.withAlpha(isDark ? 18 : 26),
+          widget.seedColor.withAlpha(isDark ? 40 : 60),
+          widget.seedColor.withAlpha(isDark ? 24 : 36),
           Colors.transparent,
         ],
       ),
-      borderRadius: BorderRadius.circular(24),
+      borderRadius: BorderRadius.circular(28),
       border: Border.all(
         color: isDark ? const Color(0xFF424242) : const Color(0x11000000),
       ),
+      boxShadow: [
+        BoxShadow(
+          color: isDark ? const Color(0x55000000) : const Color(0x22000000),
+          blurRadius: 16,
+          spreadRadius: 2,
+          offset: const Offset(0, 8),
+        ),
+      ],
     );
     final goal = 10000;
     final progress = math.min(1.0, _dailySteps / goal.toDouble());
@@ -1726,17 +1912,17 @@ class _ExerciseScreenState extends State<ExerciseScreen>
             child: Column(
               children: [
                 SizedBox(
-                  width: 160,
-                  height: 160,
+                  width: 180,
+                  height: 180,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
                       SizedBox(
-                        width: 160,
-                        height: 160,
+                        width: 180,
+                        height: 180,
                         child: CircularProgressIndicator(
                           value: progress == 0 ? null : progress,
-                          strokeWidth: 12,
+                          strokeWidth: 14,
                           color: widget.seedColor,
                           backgroundColor: isDark
                               ? const Color(0xFF2C2C2C)
@@ -1751,7 +1937,7 @@ class _ExerciseScreenState extends State<ExerciseScreen>
                             '${(progress * 100).toStringAsFixed(0)}% completado',
                             style: body.copyWith(
                               fontWeight: FontWeight.w700,
-                              fontSize: 16,
+                              fontSize: 18,
                             ),
                           ),
                         ),
@@ -1765,7 +1951,7 @@ class _ExerciseScreenState extends State<ExerciseScreen>
                   child: Text(
                     'Pasos hoy: $_dailySteps',
                     key: ValueKey(_dailySteps),
-                    style: heading.copyWith(fontSize: 20),
+                    style: heading.copyWith(fontSize: 22),
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -1779,6 +1965,7 @@ class _ExerciseScreenState extends State<ExerciseScreen>
                         color: _currentKind == ActivityKind.vehicle
                             ? Colors.grey
                             : widget.seedColor,
+                        size: 28,
                       ),
                       const SizedBox(width: 8),
                       Flexible(
@@ -1800,64 +1987,8 @@ class _ExerciseScreenState extends State<ExerciseScreen>
                     ],
                   ),
                 ),
-              ],
-            ),
-          ),
-          SizedBox(height: vspace),
-          Container(
-            decoration: cardDeco(),
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                GridView.count(
-                  physics: const NeverScrollableScrollPhysics(),
-                  shrinkWrap: true,
-                  crossAxisCount: MediaQuery.of(context).size.width > 700
-                      ? 4
-                      : 2,
-                  childAspectRatio: 1.2,
-                  mainAxisSpacing: 12,
-                  crossAxisSpacing: 12,
-                  children: [
-                    _routineTile(
-                      widget.seedColor,
-                      isDark,
-                      body,
-                      Icons.directions_run,
-                      'Cardio',
-                      onTap: _toggleCardio,
-                    ),
-                    _routineTile(
-                      widget.seedColor,
-                      isDark,
-                      body,
-                      Icons.fitness_center,
-                      'Fuerza',
-                    ),
-                    _routineTile(
-                      widget.seedColor,
-                      isDark,
-                      body,
-                      Icons.self_improvement,
-                      'Yoga',
-                    ),
-                    _routineTile(
-                      widget.seedColor,
-                      isDark,
-                      body,
-                      Icons.accessibility_new,
-                      'Estiramientos',
-                    ),
-                  ],
-                ),
-                AnimatedCrossFade(
-                  firstChild: const SizedBox.shrink(),
-                  secondChild: _cardioExpandedSection(isDark, heading, body),
-                  crossFadeState: _cardioExpanded
-                      ? CrossFadeState.showSecond
-                      : CrossFadeState.showFirst,
-                  duration: const Duration(milliseconds: 250),
-                ),
+                const SizedBox(height: 16),
+                _cardioExpandedSection(isDark, heading, body),
               ],
             ),
           ),
@@ -1874,11 +2005,50 @@ class _ExerciseScreenState extends State<ExerciseScreen>
                 ),
                 const SizedBox(height: 4),
                 SizedBox(
-                  height: 220,
+                  height: 240,
                   child: Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: _weeklyBarChart(widget.seedColor, isDark),
                   ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(height: vspace),
+          Container(
+            decoration: cardDeco(),
+            padding: const EdgeInsets.all(16),
+            child: GridView.count(
+              physics: const NeverScrollableScrollPhysics(),
+              shrinkWrap: true,
+              crossAxisCount: MediaQuery.of(context).size.width > 700 ? 3 : 1,
+              childAspectRatio: 2.3,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              children: [
+                _routineTile(
+                  widget.seedColor,
+                  isDark,
+                  body,
+                  Icons.fitness_center,
+                  'Fuerza',
+                  onTap: () => _openRoutine('Fuerza'),
+                ),
+                _routineTile(
+                  widget.seedColor,
+                  isDark,
+                  body,
+                  Icons.self_improvement,
+                  'Yoga',
+                  onTap: () => _openRoutine('Yoga'),
+                ),
+                _routineTile(
+                  widget.seedColor,
+                  isDark,
+                  body,
+                  Icons.accessibility_new,
+                  'Estiramientos',
+                  onTap: () => _openRoutine('Estiramientos'),
                 ),
               ],
             ),
@@ -1888,8 +2058,17 @@ class _ExerciseScreenState extends State<ExerciseScreen>
     );
   }
 
-  void _toggleCardio() {
-    setState(() => _cardioExpanded = !_cardioExpanded);
+  void _openRoutine(String kind) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _RoutineSuggestionScreen(
+          kind: kind,
+          brightness: widget.brightness,
+          seedColor: widget.seedColor,
+          fontFamily: widget.fontFamily,
+        ),
+      ),
+    );
   }
 
   Widget _routineTile(
@@ -2069,7 +2248,7 @@ class _ExerciseScreenState extends State<ExerciseScreen>
                     sideTitles: SideTitles(
                       showTitles: true,
                       interval: 10,
-                      getTitlesWidget: (v, m) {
+                      getTitlesWidget: (v, _) {
                         return Transform.rotate(
                           angle: -0.6,
                           child: Text(
@@ -2164,14 +2343,27 @@ class _ExerciseScreenState extends State<ExerciseScreen>
 
   Widget _weeklyBarChart(Color seed, bool isDark) {
     final bars = <BarChartGroupData>[];
-    final values = [500.0, 420.0, 650.0, 720.0, 390.0, 810.0, 560.0];
+    final u = getCurrentUser();
+    final now = DateTime.now();
+    final maxY = 12000.0;
     for (var i = 0; i < 7; i++) {
+      double steps = 0.0;
+      if (u != null) {
+        final d = now.subtract(Duration(days: 6 - i));
+        final key = '${u.correo}_${_dateKey(d)}';
+        final raw = _dailyExerciseBox.get(key);
+        if (raw is Map) {
+          steps = (raw['steps'] is int)
+              ? (raw['steps'] as int).toDouble()
+              : double.tryParse('${raw['steps'] ?? 0}') ?? 0.0;
+        }
+      }
       bars.add(
         BarChartGroupData(
           x: i,
           barRods: [
             BarChartRodData(
-              toY: values[i],
+              toY: steps.clamp(0.0, maxY),
               color: seed,
               width: 16,
               borderRadius: BorderRadius.circular(6),
@@ -2185,14 +2377,14 @@ class _ExerciseScreenState extends State<ExerciseScreen>
         gridData: FlGridData(
           show: true,
           drawVerticalLine: false,
-          horizontalInterval: 200,
+          horizontalInterval: 2000,
         ),
         borderData: FlBorderData(show: false),
         titlesData: FlTitlesData(
           bottomTitles: AxisTitles(
             sideTitles: SideTitles(
               showTitles: true,
-              getTitlesWidget: (v, m) {
+              getTitlesWidget: (v, _) {
                 const days = ['L', 'M', 'X', 'J', 'V', 'S', 'D'];
                 return Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -2214,7 +2406,7 @@ class _ExerciseScreenState extends State<ExerciseScreen>
               showTitles: true,
               reservedSize: 32,
               getTitlesWidget: (v, _) {
-                if (v % 400 != 0) return const SizedBox.shrink();
+                if (v % 4000 != 0) return const SizedBox.shrink();
                 return Text(
                   '${v.toInt()}',
                   style: TextStyle(
@@ -2232,7 +2424,652 @@ class _ExerciseScreenState extends State<ExerciseScreen>
         ),
         barGroups: bars,
         minY: 0,
-        maxY: 1000,
+        maxY: maxY,
+      ),
+    );
+  }
+}
+
+class _RoutineSuggestionScreen extends StatefulWidget {
+  final String kind;
+  final Brightness brightness;
+  final Color seedColor;
+  final String? fontFamily;
+  const _RoutineSuggestionScreen({
+    required this.kind,
+    required this.brightness,
+    required this.seedColor,
+    this.fontFamily,
+  });
+  @override
+  State<_RoutineSuggestionScreen> createState() =>
+      _RoutineSuggestionScreenState();
+}
+
+class _RoutineSuggestionScreenState extends State<_RoutineSuggestionScreen> {
+  bool _isLoading = true;
+  String? _errorMessage;
+  List<Map<String, String>> _suggestions = [];
+  late GenerativeModel _model;
+
+  @override
+  void initState() {
+    super.initState();
+    // Usa misma clave y modelo que recetas
+    const apiKey = 'AIzaSyCEwgwToG9cfPvf2wzNHGOhSeXCLafD1ms';
+    _model = GenerativeModel(model: 'gemini-2.5-flash', apiKey: apiKey);
+    _fetchSuggestions();
+  }
+
+  Future<void> _fetchSuggestions() async {
+    final u = getCurrentUser();
+    final genero = u?.genero ?? 'no especificado';
+    final edad = u?.edad ?? 0;
+    final altura = u?.altura ?? 0.0;
+    final peso = u?.peso ?? 0.0;
+    final prompt =
+        'Sugiere 4 sesiones de entrenamiento completas de ${widget.kind} personalizadas para un usuario de género $genero, $edad años, $altura cm y $peso kg. '
+        'Para cada sesión incluye: nombre, duración aproximada, breve descripción, y lista de 3-5 ejercicios con nombre, series/reps/duración y pequeña descripción. '
+        'Responde SOLO en formato JSON array.';
+    try {
+      debugPrint('Iniciando sugerencias para ${widget.kind}');
+      debugPrint('Prompt enviado: $prompt');
+      final res = await _model.generateContent([Content.text(prompt)]);
+      debugPrint('Respuesta Gemini cruda: ${res.text ?? 'null'}');
+      final text = res.text?.trim() ?? '';
+      final parsed = _parseRoutineList(text);
+      debugPrint('Parseado: ${parsed.length} ejercicios');
+      setState(() {
+        _suggestions = parsed;
+        _isLoading = false;
+      });
+    } catch (e, stack) {
+      debugPrint('ERROR GEMINI DETALLADO: $e');
+      debugPrint('Stack: $stack');
+      setState(() {
+        _errorMessage = 'Error: ${e.toString()}\nRevisa consola.';
+        _isLoading = false;
+      });
+    }
+  }
+
+  List<Map<String, String>> _parseRoutineList(String text) {
+    // Limpia posibles fences de markdown ```json ... ```
+    String clean = text.trim();
+    clean = clean.replaceAll('```json', '').replaceAll('```', '').trim();
+    debugPrint('Texto limpio para parseo: $clean');
+    // Intenta JSON primero (sobre texto limpio) con extracción de array si es necesario
+    try {
+      dynamic data;
+      try {
+        data = json.decode(clean);
+      } catch (e) {
+        debugPrint('Parseo JSON falló, texto crudo: $text');
+        final start = clean.indexOf('[');
+        final end = clean.lastIndexOf(']');
+        if (start != -1 && end != -1 && end > start) {
+          final jsonStr = clean.substring(start, end + 1);
+          data = json.decode(jsonStr);
+        }
+      }
+      if (data is List) {
+        return data
+            .whereType<Map>()
+            .map((item) {
+              final nombre = '${item['nombre'] ?? item['name'] ?? ''}'.trim();
+              if (nombre.isEmpty) return <String, String>{};
+              final duracion = '${item['duracion'] ?? item['duration'] ?? ''}'
+                  .trim();
+              final desc = '${item['descripcion'] ?? item['description'] ?? ''}'
+                  .trim();
+              final ejerciciosRaw = item['ejercicios'] ?? item['exercises'];
+              String ejercicios = '';
+              String ejerciciosJson = '';
+              if (ejerciciosRaw is List) {
+                if (ejerciciosRaw.isNotEmpty && ejerciciosRaw.first is Map) {
+                  final norm = <Map<String, String>>[];
+                  for (final e in ejerciciosRaw) {
+                    final m = Map<String, dynamic>.from(e as Map);
+                    final enombre = '${m['nombre'] ?? m['name'] ?? ''}'.trim();
+                    final edet =
+                        '${m['seriesRepsDuracion'] ?? m['reps'] ?? m['series'] ?? m['detalle'] ?? ''}'
+                            .trim();
+                    final tiempo = '${m['duracion'] ?? m['duration'] ?? ''}'
+                        .trim();
+                    final edesc =
+                        '${m['descripcion'] ?? m['description'] ?? ''}'.trim();
+                    final out = <String, String>{};
+                    if (enombre.isNotEmpty) out['nombre'] = enombre;
+                    if (edet.isNotEmpty) out['detalle'] = edet;
+                    if (tiempo.isNotEmpty) out['tiempo'] = tiempo;
+                    if (edesc.isNotEmpty) out['descripcion'] = edesc;
+                    if (out.isNotEmpty) norm.add(out);
+                  }
+                  ejerciciosJson = json.encode(norm);
+                } else {
+                  final lines = <String>[];
+                  for (final e in ejerciciosRaw) {
+                    final s = '$e'.trim();
+                    if (s.isEmpty) continue;
+                    lines.add(s);
+                  }
+                  ejercicios = lines.join('\n');
+                }
+              } else if (ejerciciosRaw is String) {
+                ejercicios = ejerciciosRaw.trim();
+              }
+              return {
+                'nombre': nombre,
+                if (duracion.isNotEmpty) 'duracion': duracion,
+                if (desc.isNotEmpty) 'descripcion': desc,
+                if (ejercicios.isNotEmpty) 'ejercicios': ejercicios,
+                if (ejerciciosJson.isNotEmpty) 'ejerciciosJson': ejerciciosJson,
+              };
+            })
+            .where((m) => m.isNotEmpty)
+            .cast<Map<String, String>>()
+            .toList();
+      }
+    } catch (_) {
+      // continúa con parseo manual
+    }
+    // Parseo manual básico
+    final lines = text
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+    final out = <Map<String, String>>[];
+    Map<String, String> current = {};
+    for (final l in lines) {
+      final lower = l.toLowerCase();
+      if (RegExp(r'^\d+[\)\.]').hasMatch(l) || lower.startsWith('- ')) {
+        if (current.isNotEmpty) out.add(current);
+        current = {};
+        current['nombre'] = l
+            .replaceFirst(RegExp(r'^\d+[\)\.\s-]*'), '')
+            .trim();
+      } else if (lower.startsWith('duracion') || lower.startsWith('duración')) {
+        current['duracion'] = l
+            .replaceFirst(
+              RegExp(r'duraci[oó]n[:\s]*', caseSensitive: false),
+              '',
+            )
+            .trim();
+      } else if (lower.contains('descrip')) {
+        current['descripcion'] = l;
+      } else if (lower.startsWith('*') || lower.startsWith('-')) {
+        final line = l.replaceFirst(RegExp(r'^[\*\-]\s*'), '').trim();
+        final prev = current['ejercicios'] ?? '';
+        current['ejercicios'] = prev.isEmpty ? line : '$prev\n$line';
+      }
+    }
+    if (current.isNotEmpty) out.add(current);
+    return out.where((m) => m.containsKey('nombre')).toList();
+  }
+
+  // Fallback eliminado: resultados 100% automáticos desde Gemini
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = widget.brightness == Brightness.dark;
+    final body = TextStyle(
+      fontSize: 16,
+      color: isDark ? const Color(0xFFD0D0D0) : const Color(0xFF1F1F1F),
+      fontFamily: widget.fontFamily,
+    );
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Sugerencias: ${widget.kind}'),
+        backgroundColor: isDark
+            ? widget.seedColor.withAlpha(80)
+            : widget.seedColor.withAlpha(120),
+        foregroundColor: Colors.white,
+      ),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              (isDark ? const Color(0xFF121212) : const Color(0xFFF7F7F7)),
+              widget.seedColor.withAlpha(isDark ? 40 : 30),
+            ],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+          ),
+        ),
+        child: _isLoading
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 12),
+                    Text('Generando sugerencias...', style: body),
+                  ],
+                ),
+              )
+            : _errorMessage != null
+            ? Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(_errorMessage!, style: body),
+                      const SizedBox(height: 12),
+                      FilledButton.tonalIcon(
+                        onPressed: () {
+                          _fetchSuggestions();
+                        },
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Reintentar'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: widget.seedColor.withAlpha(40),
+                          foregroundColor: isDark
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            : _suggestions.isEmpty
+            ? Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'No se encontraron sugerencias. Intenta de nuevo.',
+                        style: body,
+                      ),
+                      const SizedBox(height: 12),
+                      FilledButton.tonalIcon(
+                        onPressed: () {
+                          _fetchSuggestions();
+                        },
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Reintentar'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: widget.seedColor.withAlpha(40),
+                          foregroundColor: isDark
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.all(16),
+                itemCount: _suggestions.length,
+                separatorBuilder: (_, i) => const SizedBox(height: 12),
+                itemBuilder: (context, i) {
+                  final it = _suggestions[i];
+                  final emoji = widget.kind.toLowerCase().contains('yoga')
+                      ? '🧘'
+                      : widget.kind.toLowerCase().contains('estira')
+                      ? '🏋️'
+                      : '💪';
+                  return InkWell(
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => SessionDetailScreen(
+                            session: it,
+                            seedColor: widget.seedColor,
+                            brightness: widget.brightness,
+                            fontFamily: widget.fontFamily,
+                          ),
+                        ),
+                      );
+                    },
+                    child: Material(
+                      elevation: 2,
+                      color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(16),
+                          gradient: LinearGradient(
+                            colors: [
+                              (isDark ? const Color(0xFF1E1E1E) : Colors.white),
+                              widget.seedColor.withAlpha(isDark ? 26 : 20),
+                            ],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                        ),
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  emoji,
+                                  style: const TextStyle(fontSize: 24),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        it['nombre'] ?? 'Sesión',
+                                        style:
+                                            Theme.of(context)
+                                                .textTheme
+                                                .headlineMedium
+                                                ?.copyWith(
+                                                  color: isDark
+                                                      ? const Color(0xFFD0D0D0)
+                                                      : const Color(0xFF1F1F1F),
+                                                  fontFamily: widget.fontFamily,
+                                                ) ??
+                                            body.copyWith(
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 20,
+                                            ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        it['duracion'] ?? '45 min',
+                                        style: body.copyWith(
+                                          color: isDark
+                                              ? const Color(0xFFA0B0C0)
+                                              : const Color(0xFF616161),
+                                        ),
+                                      ),
+                                      if ((it['descripcion'] ?? '').isNotEmpty)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            top: 6,
+                                          ),
+                                          child: Text(
+                                            it['descripcion']!,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: body,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+      ),
+    );
+  }
+}
+
+class SessionDetailScreen extends StatelessWidget {
+  final Map<String, String> session;
+  final Brightness brightness;
+  final Color seedColor;
+  final String? fontFamily;
+  const SessionDetailScreen({
+    super.key,
+    required this.session,
+    required this.seedColor,
+    required this.brightness,
+    this.fontFamily,
+  });
+  List<Map<String, String>> _buildExercises() {
+    final jsonStr = session['ejerciciosJson'] ?? '';
+    if (jsonStr.isNotEmpty) {
+      try {
+        final data = json.decode(jsonStr);
+        if (data is List) {
+          return data.whereType<Map>().map((e) {
+            final m = Map<String, dynamic>.from(e);
+            final n = '${m['nombre'] ?? ''}'.trim();
+            final d = '${m['detalle'] ?? ''}'.trim();
+            final t = '${m['tiempo'] ?? ''}'.trim();
+            final desc = '${m['descripcion'] ?? ''}'.trim();
+            return {
+              'nombre': n,
+              'detalle': d,
+              'tiempo': t,
+              'descripcion': desc,
+            };
+          }).toList();
+        }
+      } catch (_) {}
+    }
+    final lines = (session['ejercicios'] ?? '')
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    return lines.map((l) {
+      String name = l;
+      String det = '';
+      String t = '';
+      String desc = '';
+      if (l.contains(':')) {
+        final idx = l.indexOf(':');
+        name = l.substring(0, idx).trim();
+        det = l.substring(idx + 1).trim();
+      } else if (l.contains('-')) {
+        final idx = l.indexOf('-');
+        name = l.substring(0, idx).trim();
+        det = l.substring(idx + 1).trim();
+      }
+      final p = RegExp(r'\(([^)]+)\)').firstMatch(l);
+      if (p != null) desc = (p.group(1) ?? '').trim();
+      if (det.isEmpty) {
+        final r1 = RegExp(
+          r'(\d+)\s*x\s*(\d+(?:-\d+)?)',
+          caseSensitive: false,
+        ).firstMatch(l);
+        final r2 = RegExp(
+          r'(\d+)\s*series?\s*(de)?\s*(\d+(?:-\d+)?)\s*reps?',
+          caseSensitive: false,
+        ).firstMatch(l);
+        if (r1 != null) {
+          det = '${r1.group(1)} series de ${r1.group(2)} reps';
+        } else if (r2 != null) {
+          det = '${r2.group(1)} series de ${r2.group(3)} reps';
+        }
+      }
+      final m = RegExp(r'(\d+)\s*min', caseSensitive: false).firstMatch(l);
+      if (m != null) t = '${m.group(1)} min';
+      return {'nombre': name, 'detalle': det, 'tiempo': t, 'descripcion': desc};
+    }).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = brightness == Brightness.dark;
+    final body = TextStyle(
+      fontSize: 16,
+      color: isDark ? const Color(0xFFD0D0D0) : const Color(0xFF1F1F1F),
+      fontFamily: fontFamily,
+    );
+    final items = _buildExercises();
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(session['nombre'] ?? 'Sesión'),
+        backgroundColor: isDark
+            ? seedColor.withAlpha(80)
+            : seedColor.withAlpha(120),
+        foregroundColor: Colors.white,
+      ),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              (isDark ? const Color(0xFF121212) : const Color(0xFFF7F7F7)),
+              seedColor.withAlpha(isDark ? 40 : 30),
+            ],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    session['nombre'] ?? 'Sesión',
+                    style:
+                        Theme.of(context).textTheme.headlineMedium?.copyWith(
+                          color: isDark
+                              ? const Color(0xFFD0D0D0)
+                              : const Color(0xFF1F1F1F),
+                          fontFamily: fontFamily,
+                        ) ??
+                        body.copyWith(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 20,
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    session['duracion'] ?? '45 min',
+                    style: body.copyWith(
+                      color: isDark
+                          ? const Color(0xFFA0B0C0)
+                          : const Color(0xFF616161),
+                    ),
+                  ),
+                  if ((session['descripcion'] ?? '').isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(
+                        session['descripcion']!,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: body,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: items.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'No se pudo cargar la sesión. Intenta de nuevo.',
+                              style: body,
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 12),
+                            FilledButton.tonalIcon(
+                              onPressed: () {
+                                Navigator.of(context).pop();
+                              },
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Reintentar'),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: seedColor.withAlpha(40),
+                                foregroundColor: isDark
+                                    ? Colors.white
+                                    : Colors.black87,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemBuilder: (_, i) {
+                        final ex = items[i];
+                        return Material(
+                          elevation: 2,
+                          color: isDark
+                              ? const Color(0xFF1E1E1E)
+                              : Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(16),
+                              gradient: LinearGradient(
+                                colors: [
+                                  (isDark
+                                      ? const Color(0xFF1E1E1E)
+                                      : Colors.white),
+                                  seedColor.withAlpha(isDark ? 26 : 20),
+                                ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                            ),
+                            padding: const EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  ex['nombre'] ?? 'Ejercicio',
+                                  style: body.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                if ((ex['descripcion'] ?? '').isNotEmpty)
+                                  Text(
+                                    ex['descripcion']!,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: body.copyWith(
+                                      color: isDark
+                                          ? const Color(0xFFA0B0C0)
+                                          : const Color(0xFF616161),
+                                    ),
+                                  ),
+                                const SizedBox(height: 4),
+                                if ((ex['detalle'] ?? '').isNotEmpty)
+                                  Text(
+                                    'Series/Reps: ${ex['detalle']}',
+                                    style: body,
+                                  ),
+                                if ((ex['tiempo'] ?? '').isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Text(
+                                      'Tiempo estimado: ${ex['tiempo']}',
+                                      style: body.copyWith(
+                                        color: isDark
+                                            ? const Color(0xFFA0B0C0)
+                                            : const Color(0xFF616161),
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                      separatorBuilder: (context, index) =>
+                          const SizedBox(height: 12),
+                      itemCount: items.length,
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2253,8 +3090,9 @@ class HydrationScreen extends StatefulWidget {
 }
 
 class _HydrationScreenState extends State<HydrationScreen> {
-  double _liters = 1.8;
-  final double _goal = 3.0;
+  double _liters = 0.0;
+  double _goal = 3.0;
+  List<double> _weeklyPercent = List.filled(7, 0.0);
   @override
   void initState() {
     super.initState();
@@ -2262,15 +3100,52 @@ class _HydrationScreenState extends State<HydrationScreen> {
   }
 
   Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
+    final u = getCurrentUser();
+    if (u == null) return;
+    final s = getSettingsForUser(u.correo);
+    if (s?.metaHydratationMl != null) {
+      _goal = (s!.metaHydratationMl! / 1000.0).clamp(1.0, 5.0);
+    } else {
+      _goal = computeDailyHydrationGoalMl(u) / 1000.0;
+    }
+    final today = _dateKey(DateTime.now());
+    final summaryKey = '${u.correo}_$today';
+    final raw = _hydrationSummaryBox.get(summaryKey);
+    double total = 0.0;
+    if (raw is Map) {
+      total = (raw['total_ml'] is double)
+          ? raw['total_ml']
+          : double.tryParse('${raw['total_ml'] ?? 0}') ?? 0.0;
+    }
+    final weekly = <double>[];
+    final now = DateTime.now();
+    for (int i = 6; i >= 0; i--) {
+      final d = now.subtract(Duration(days: i));
+      final key = '${u.correo}_${_dateKey(d)}';
+      final r = _hydrationSummaryBox.get(key);
+      double t = 0.0;
+      if (r is Map) {
+        t = (r['total_ml'] is double)
+            ? r['total_ml']
+            : double.tryParse('${r['total_ml'] ?? 0}') ?? 0.0;
+      }
+      final p = ((t / (_goal * 1000.0)) * 100.0).clamp(0.0, 100.0);
+      weekly.add(p);
+    }
     setState(() {
-      _liters = prefs.getDouble('hydration_liters') ?? 1.8;
+      _liters = (total / 1000.0).clamp(0.0, 10.0);
+      _weeklyPercent = weekly;
     });
   }
 
   Future<void> _save(double v) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('hydration_liters', v);
+    final u = getCurrentUser();
+    if (u == null) return;
+    final deltaMl = (v - _liters) * 1000.0;
+    if (deltaMl > 0) {
+      await addHydrationMl(u.correo, deltaMl);
+      await _load();
+    }
   }
 
   @override
@@ -2394,7 +3269,7 @@ class _HydrationScreenState extends State<HydrationScreen> {
                 const SizedBox(height: 8),
                 SizedBox(
                   height: 220,
-                  child: _hydrationLineChart(widget.seedColor, isDark),
+                  child: _hydrationLineChartDynamic(widget.seedColor, isDark),
                 ),
               ],
             ),
@@ -2407,7 +3282,10 @@ class _HydrationScreenState extends State<HydrationScreen> {
               children: [
                 ListTile(
                   leading: Icon(Icons.flag, color: widget.seedColor),
-                  title: Text('Meta diaria: 2.5–3 L', style: body),
+                  title: Text(
+                    'Meta diaria: ${_goal.toStringAsFixed(1)} L',
+                    style: body,
+                  ),
                 ),
                 ListTile(
                   leading: Icon(Icons.alarm, color: widget.seedColor),
@@ -2450,19 +3328,14 @@ class _HydrationScreenState extends State<HydrationScreen> {
     );
   }
 
-  Widget _hydrationLineChart(Color seed, bool isDark) {
-    final spots = <FlSpot>[
-      const FlSpot(0, 1.8),
-      const FlSpot(1, 2.2),
-      const FlSpot(2, 1.5),
-      const FlSpot(3, 2.8),
-      const FlSpot(4, 2.0),
-      const FlSpot(5, 3.0),
-      const FlSpot(6, 2.5),
-    ];
+  Widget _hydrationLineChartDynamic(Color seed, bool isDark) {
+    final spots = <FlSpot>[];
+    for (var i = 0; i < 7; i++) {
+      spots.add(FlSpot(i.toDouble(), _weeklyPercent[i]));
+    }
     return LineChart(
       LineChartData(
-        gridData: FlGridData(show: false),
+        gridData: FlGridData(show: true, drawVerticalLine: false),
         borderData: FlBorderData(show: false),
         titlesData: FlTitlesData(
           bottomTitles: AxisTitles(
@@ -2484,7 +3357,24 @@ class _HydrationScreenState extends State<HydrationScreen> {
               },
             ),
           ),
-          leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 32,
+              getTitlesWidget: (v, _) {
+                if (v % 25 != 0) return const SizedBox.shrink();
+                return Text(
+                  '${v.toInt()}%',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: isDark
+                        ? const Color(0xFFA0B0C0)
+                        : const Color(0xFF9E9E9E),
+                  ),
+                );
+              },
+            ),
+          ),
           topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
           rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
         ),
@@ -2499,7 +3389,7 @@ class _HydrationScreenState extends State<HydrationScreen> {
           ),
         ],
         minY: 0,
-        maxY: 3.5,
+        maxY: 100,
       ),
     );
   }
@@ -2519,29 +3409,14 @@ class SleepScreen extends StatefulWidget {
   State<SleepScreen> createState() => _SleepScreenState();
 }
 
-class _SleepScreenState extends State<SleepScreen> {
-  final double _hours = 7.5;
-  int _rating = 4;
-  final List<Map<String, String>> _log = [
-    {
-      'fecha': 'Hoy',
-      'dormir': '23:30',
-      'despertar': '07:00',
-      'calidad': 'Buena',
-    },
-    {
-      'fecha': 'Ayer',
-      'dormir': '00:10',
-      'despertar': '07:30',
-      'calidad': 'Buena',
-    },
-    {
-      'fecha': 'Domingo',
-      'dormir': '23:50',
-      'despertar': '07:10',
-      'calidad': 'Media',
-    },
-  ];
+class _SleepScreenState extends State<SleepScreen> with WidgetsBindingObserver {
+  StreamSubscription<dynamic>? _screenEvents;
+  DateTime? _screenOffStart;
+  bool _monitoring = false;
+  Map<String, dynamic>? _lastNight;
+  List<Map<String, dynamic>> _recent = [];
+  Timer? _cutoffTimer;
+  Box get _sleepBox => Hive.box('daily_sleep');
   @override
   Widget build(BuildContext context) {
     final isDark = widget.brightness == Brightness.dark;
@@ -2557,11 +3432,6 @@ class _SleepScreenState extends State<SleepScreen> {
     final body = TextStyle(
       fontSize: 16,
       color: isDark ? const Color(0xFFD0D0D0) : const Color(0xFF1F1F1F),
-      fontFamily: widget.fontFamily,
-    );
-    final sub = TextStyle(
-      fontSize: 14,
-      color: isDark ? const Color(0xFFA0B0C0) : const Color(0xFF616161),
       fontFamily: widget.fontFamily,
     );
     final appBarColor = isDark
@@ -2606,18 +3476,24 @@ class _SleepScreenState extends State<SleepScreen> {
               );
               if (!context.mounted) return;
               if (despertar == null) return;
-              String fmt(TimeOfDay t) =>
-                  '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-              final dormirTxt = fmt(dormir);
-              final despertarTxt = fmt(despertar);
-              setState(() {
-                _log.add({
-                  'fecha': 'Nuevo',
-                  'dormir': dormirTxt,
-                  'despertar': despertarTxt,
-                  'calidad': 'Buena',
-                });
-              });
+              final u = getCurrentUser();
+              if (u == null) return;
+              final date = _resolveSleepDateForNow();
+              final start = _timeOfDayToDate(date, dormir);
+              final end = _timeOfDayToDate(
+                date.add(const Duration(days: 1)),
+                despertar,
+              );
+              final durH = end.difference(start).inMinutes / 60.0;
+              await _saveSleep(
+                userId: u.correo,
+                date: _fmtDate(date),
+                start: start,
+                end: end,
+                durationH: durH,
+                quality: _initialQualityForHours(durH),
+              );
+              await _reload();
             },
             icon: const Icon(Icons.add),
           ),
@@ -2638,21 +3514,31 @@ class _SleepScreenState extends State<SleepScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Anoche: ${_hours.toStringAsFixed(1)} h',
+                        'Anoche: ${(_lastNight?['duration_h'] ?? 0.0).toStringAsFixed(1)} h',
                         style: heading.copyWith(fontSize: 20),
                       ),
                       const SizedBox(height: 6),
                       Row(
                         children: List.generate(5, (i) {
+                          final q = (_lastNight?['quality'] ?? 0) as int;
                           return IconButton(
                             padding: EdgeInsets.zero,
                             visualDensity: const VisualDensity(
                               horizontal: -4,
                               vertical: -4,
                             ),
-                            onPressed: () => setState(() => _rating = i + 1),
+                            onPressed: () async {
+                              final u = getCurrentUser();
+                              if (u == null || _lastNight == null) return;
+                              await _updateQuality(
+                                u.correo,
+                                _lastNight!['date'] as String,
+                                i + 1,
+                              );
+                              await _reload();
+                            },
                             icon: Icon(
-                              i < _rating ? Icons.star : Icons.star_border,
+                              i < q ? Icons.star : Icons.star_border,
                               color: Colors.amber.shade600,
                             ),
                           );
@@ -2675,7 +3561,7 @@ class _SleepScreenState extends State<SleepScreen> {
                 const SizedBox(height: 8),
                 SizedBox(
                   height: 220,
-                  child: _sleepBarChart(widget.seedColor, isDark),
+                  child: _sleepBarChartDynamic(widget.seedColor, isDark),
                 ),
               ],
             ),
@@ -2685,15 +3571,25 @@ class _SleepScreenState extends State<SleepScreen> {
             decoration: cardDeco(),
             padding: const EdgeInsets.all(8),
             child: Column(
-              children: _log
+              children: _recent
                   .map(
                     (e) => ListTile(
                       leading: Icon(Icons.nights_stay, color: widget.seedColor),
                       title: Text(
-                        '${e['fecha']}: ${e['dormir']} – ${e['despertar']}',
+                        '${e['date']}: ${(e['duration_h'] as double).toStringAsFixed(1)} h',
                         style: body,
                       ),
-                      subtitle: Text('Calidad: ${e['calidad']}', style: sub),
+                      subtitle: Row(
+                        children: List.generate(5, (i) {
+                          return Icon(
+                            i < (e['quality'] ?? 0)
+                                ? Icons.star
+                                : Icons.star_border,
+                            color: Colors.amber.shade600,
+                            size: 18,
+                          );
+                        }),
+                      ),
                       trailing: const Icon(Icons.chevron_right),
                     ),
                   )
@@ -2725,16 +3621,247 @@ class _SleepScreenState extends State<SleepScreen> {
     );
   }
 
-  Widget _sleepBarChart(Color seed, bool isDark) {
+  @override
+  void initState() {
+    super.initState();
+    _initSleep();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _screenEvents?.cancel();
+    _cutoffTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _initSleep() async {
+    if (!Hive.isBoxOpen('daily_sleep')) {
+      await Hive.openBox('daily_sleep');
+    }
+    await _reload();
+    _startMonitoring();
+    _scheduleCutoff();
+  }
+
+  Future<void> _reload() async {
+    final u = getCurrentUser();
+    if (u == null) return;
+    final today = DateTime.now();
+    final List<Map<String, dynamic>> list = [];
+    for (int i = 6; i >= 0; i--) {
+      final d = today.subtract(Duration(days: i));
+      final key = '${u.correo}_${_fmtDate(d)}';
+      final raw = _sleepBox.get(key);
+      if (raw is Map) {
+        list.add(raw.cast<String, dynamic>());
+      } else {
+        list.add({
+          'userId': u.correo,
+          'date': _fmtDate(d),
+          'duration_h': 0.0,
+          'quality': 0,
+        });
+      }
+    }
+    _recent = list;
+    _lastNight = list.isNotEmpty ? list.last : null;
+    if (mounted) setState(() {});
+  }
+
+  void _startMonitoring() {
+    if (_monitoring) return;
+    _monitoring = true;
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  void _scheduleCutoff() {
+    _cutoffTimer?.cancel();
+    final now = DateTime.now();
+    final nextCutoff = _nextCutoff(now);
+    final ms = nextCutoff.difference(now).inMilliseconds;
+    _cutoffTimer = Timer(Duration(milliseconds: ms), () async {
+      final start = _screenOffStart;
+      _screenOffStart = null;
+      if (start != null) {
+        await _accumulateSleep(start, nextCutoff);
+      }
+      await _ensureTodayEntry();
+      await _reload();
+      _scheduleCutoff();
+    });
+  }
+
+  Future<void> _ensureTodayEntry() async {
+    final u = getCurrentUser();
+    if (u == null) return;
+    final date = _fmtDate(DateTime.now());
+    final key = '${u.correo}_$date';
+    if (_sleepBox.get(key) == null) {
+      await _sleepBox.put(key, {
+        'userId': u.correo,
+        'date': date,
+        'duration_h': 0.0,
+        'quality': 0,
+      });
+    }
+  }
+
+  Future<void> _accumulateSleep(DateTime start, DateTime end) async {
+    DateTime s = start;
+    DateTime e = end;
+    if (!_inWindow(s)) s = _clipToWindowStart(s);
+    if (!_inWindow(e)) e = _clipToWindowEnd(e);
+    final minutes = e.difference(s).inMinutes;
+    if (minutes < 10) return;
+    final u = getCurrentUser();
+    if (u == null) return;
+    final date = _fmtDate(_resolveSleepDateForNow(from: s));
+    final key = '${u.correo}_$date';
+    final raw = _sleepBox.get(key);
+    double prev = 0.0;
+    DateTime? firstStart;
+    DateTime? lastEnd;
+    int quality = 0;
+    if (raw is Map) {
+      prev = (raw['duration_h'] is double)
+          ? raw['duration_h']
+          : double.tryParse('${raw['duration_h'] ?? 0}') ?? 0.0;
+      final ss = raw['hora_inicio'];
+      final se = raw['hora_fin'];
+      if (ss is String) firstStart = DateTime.tryParse(ss);
+      if (se is String) lastEnd = DateTime.tryParse(se);
+      quality = (raw['quality'] is int)
+          ? raw['quality']
+          : int.tryParse('${raw['quality'] ?? 0}') ?? 0;
+    }
+    final durH = prev + (minutes / 60.0);
+    firstStart ??= s;
+    lastEnd = e;
+    await _sleepBox.put(key, {
+      'userId': u.correo,
+      'date': date,
+      'hora_inicio': firstStart.toIso8601String(),
+      'hora_fin': lastEnd.toIso8601String(),
+      'duration_h': durH,
+      'quality': quality == 0 ? _initialQualityForHours(durH) : quality,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> _saveSleep({
+    required String userId,
+    required String date,
+    required DateTime start,
+    required DateTime end,
+    required double durationH,
+    required int quality,
+  }) async {
+    final key = '${userId}_$date';
+    await _sleepBox.put(key, {
+      'userId': userId,
+      'date': date,
+      'hora_inicio': start.toIso8601String(),
+      'hora_fin': end.toIso8601String(),
+      'duration_h': durationH,
+      'quality': quality,
+      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> _updateQuality(String userId, String date, int q) async {
+    final key = '${userId}_$date';
+    final raw = _sleepBox.get(key);
+    if (raw is Map) {
+      raw['quality'] = q;
+      await _sleepBox.put(key, raw);
+    }
+  }
+
+  bool _inWindow(DateTime d) {
+    final h = d.hour;
+    return (h >= 19 && h <= 23) || (h >= 0 && h < 7);
+  }
+
+  DateTime _nextCutoff(DateTime now) {
+    final tomorrow7 = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).add(const Duration(days: 1)).add(const Duration(hours: 7));
+    if (now.hour < 7) {
+      return DateTime(now.year, now.month, now.day, 7);
+    }
+    return tomorrow7;
+  }
+
+  DateTime _clipToWindowStart(DateTime d) {
+    if (d.hour < 7) {
+      return DateTime(d.year, d.month, d.day, 0, 0);
+    }
+    return DateTime(d.year, d.month, d.day, 19, 0);
+  }
+
+  DateTime _clipToWindowEnd(DateTime d) {
+    if (d.hour < 7) {
+      return DateTime(d.year, d.month, d.day, 7, 0);
+    }
+    return DateTime(d.year, d.month, d.day, 23, 59, 59);
+  }
+
+  DateTime _resolveSleepDateForNow({DateTime? from}) {
+    final now = from ?? DateTime.now();
+    if (now.hour < 7) {
+      return DateTime(
+        now.year,
+        now.month,
+        now.day,
+      ).subtract(const Duration(days: 1));
+    }
+    return DateTime(now.year, now.month, now.day);
+  }
+
+  String _fmtDate(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      final now = DateTime.now();
+      if (_inWindow(now)) {
+        _screenOffStart = now;
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      final start = _screenOffStart;
+      _screenOffStart = null;
+      final now = DateTime.now();
+      if (start != null) {
+        _accumulateSleep(start, now);
+      }
+    }
+  }
+
+  DateTime _timeOfDayToDate(DateTime date, TimeOfDay t) =>
+      DateTime(date.year, date.month, date.day, t.hour, t.minute);
+
+  int _initialQualityForHours(double h) {
+    if (h < 6.0) return 2;
+    if (h <= 8.0) return 4;
+    return 5;
+  }
+
+  Widget _sleepBarChartDynamic(Color seed, bool isDark) {
     final bars = <BarChartGroupData>[];
-    final values = [7.5, 6.0, 8.0, 7.0, 7.8, 8.2, 7.0];
     for (var i = 0; i < 7; i++) {
+      final v = i < _recent.length
+          ? (_recent[i]['duration_h'] as double? ?? 0.0)
+          : 0.0;
       bars.add(
         BarChartGroupData(
           x: i,
           barRods: [
             BarChartRodData(
-              toY: values[i],
+              toY: v,
               color: seed,
               width: 18,
               borderRadius: BorderRadius.circular(6),
@@ -2769,7 +3896,7 @@ class _SleepScreenState extends State<SleepScreen> {
           rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
         ),
         barGroups: bars,
-        maxY: 9,
+        maxY: 12,
       ),
     );
   }
@@ -2998,7 +4125,13 @@ class _LoginFormState extends State<_LoginForm> {
                         return;
                       }
                       if (!mounted) return;
-                      Navigator.of(context).pushReplacement(
+                      final nav = Navigator.of(context);
+                      await _usersBox.put(
+                        'currentUserEmail',
+                        _emailCtrl.text.trim(),
+                      );
+                      if (!mounted) return;
+                      nav.pushReplacement(
                         MaterialPageRoute(builder: (_) => const VidaPlusApp()),
                       );
                     },
@@ -3269,6 +4402,16 @@ class _RegisterFormState extends State<_RegisterForm> {
                         context,
                       ); // Corregido lint: use_build_method
                       await saveCurrentUser(u);
+                      await saveSettings(
+                        UserSettings(
+                          userId: u.correo,
+                          brightness: null,
+                          seedColor: colorToArgb(const Color(0xFF80CBC4)),
+                          fontFamily: null,
+                          followLocation: false,
+                          metaHydratationMl: computeDailyHydrationGoalMl(u),
+                        ),
+                      );
                       if (!mounted) return;
                       nav.pushReplacement(
                         MaterialPageRoute(builder: (_) => const VidaPlusApp()),
@@ -4435,7 +5578,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: AnimatedSwitcher(
         duration: const Duration(milliseconds: 350),
         child: ListView(
-          key: ValueKey('${_brightness}_${_seed.toARGB32()}'),
+          key: ValueKey('${_brightness}_${colorToArgb(_seed)}'),
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
           children: [
             Row(
@@ -4573,23 +5716,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           setState(() => _brightness = s.first);
                           final u = getCurrentUser();
                           if (u != null) {
-                            final updated = User(
-                              nombre: u.nombre,
-                              apellido: u.apellido,
-                              genero: u.genero,
-                              edad: u.edad,
-                              altura: u.altura,
-                              peso: u.peso,
-                              correo: u.correo,
-                              contrasena: u.contrasena,
+                            final prev = getSettingsForUser(u.correo);
+                            final sdata = UserSettings(
+                              userId: u.correo,
                               brightness: _brightness == Brightness.dark
                                   ? 'dark'
                                   : 'light',
-                              seedColor: u.seedColor,
-                              fontFamily: u.fontFamily,
-                              followLocation: u.followLocation,
+                              seedColor: prev?.seedColor ?? colorToArgb(_seed),
+                              fontFamily: prev?.fontFamily,
+                              followLocation:
+                                  prev?.followLocation ?? _followLocation,
+                              metaHydratationMl:
+                                  prev?.metaHydratationMl ??
+                                  computeDailyHydrationGoalMl(u),
                             );
-                            saveCurrentUser(updated);
+                            saveSettings(sdata);
                           }
                           _emit();
                         },
@@ -4664,21 +5805,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         setState(() => _seed = e.value);
                                         final u = getCurrentUser();
                                         if (u != null) {
-                                          final updated = User(
-                                            nombre: u.nombre,
-                                            apellido: u.apellido,
-                                            genero: u.genero,
-                                            edad: u.edad,
-                                            altura: u.altura,
-                                            peso: u.peso,
-                                            correo: u.correo,
-                                            contrasena: u.contrasena,
-                                            brightness: u.brightness,
-                                            seedColor: _seed.toARGB32(),
-                                            fontFamily: u.fontFamily,
-                                            followLocation: u.followLocation,
+                                          final prev = getSettingsForUser(
+                                            u.correo,
                                           );
-                                          saveCurrentUser(updated);
+                                          final sdata = UserSettings(
+                                            userId: u.correo,
+                                            brightness: prev?.brightness,
+                                            seedColor: colorToArgb(_seed),
+                                            fontFamily:
+                                                prev?.fontFamily ?? _fontFamily,
+                                            followLocation:
+                                                prev?.followLocation ??
+                                                _followLocation,
+                                            metaHydratationMl:
+                                                prev?.metaHydratationMl ??
+                                                computeDailyHydrationGoalMl(u),
+                                          );
+                                          saveSettings(sdata);
                                         }
                                         _emit();
                                       },
@@ -4835,6 +5978,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 contrasena: u.contrasena,
                               );
                               await saveCurrentUser(updated);
+                              final prev = getSettingsForUser(u.correo);
+                              final goal = computeDailyHydrationGoalMl(updated);
+                              await saveSettings(
+                                UserSettings(
+                                  userId: u.correo,
+                                  brightness: prev?.brightness,
+                                  seedColor:
+                                      prev?.seedColor ?? colorToArgb(_seed),
+                                  fontFamily: prev?.fontFamily ?? _fontFamily,
+                                  followLocation:
+                                      prev?.followLocation ?? _followLocation,
+                                  metaHydratationMl: goal,
+                                ),
+                              );
                               if (!mounted) return;
                               messenger.showSnackBar(
                                 const SnackBar(
@@ -5004,7 +6161,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         onTap: () async {
                           final nav = Navigator.of(context);
-                          await _userBox.delete('currentUserEmail');
+                          await _usersBox.delete('currentUserEmail');
                           if (!mounted) return;
                           nav.pushAndRemoveUntil(
                             MaterialPageRoute(
@@ -5080,6 +6237,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: _followLocation,
                             onChanged: (v) {
                               setState(() => _followLocation = v);
+                              final u = getCurrentUser();
+                              if (u != null) {
+                                final prev = getSettingsForUser(u.correo);
+                                saveSettings(
+                                  UserSettings(
+                                    userId: u.correo,
+                                    brightness: prev?.brightness,
+                                    seedColor:
+                                        prev?.seedColor ?? colorToArgb(_seed),
+                                    fontFamily: prev?.fontFamily ?? _fontFamily,
+                                    followLocation: v,
+                                    metaHydratationMl:
+                                        prev?.metaHydratationMl ??
+                                        computeDailyHydrationGoalMl(u),
+                                  ),
+                                );
+                              }
                               _emit();
                             },
                           ),
@@ -5285,21 +6459,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           );
                           final u = getCurrentUser();
                           if (u != null) {
-                            final updated = User(
-                              nombre: u.nombre,
-                              apellido: u.apellido,
-                              genero: u.genero,
-                              edad: u.edad,
-                              altura: u.altura,
-                              peso: u.peso,
-                              correo: u.correo,
-                              contrasena: u.contrasena,
-                              brightness: u.brightness,
-                              seedColor: u.seedColor,
-                              fontFamily: _fontFamily,
-                              followLocation: u.followLocation,
+                            final prev = getSettingsForUser(u.correo);
+                            saveSettings(
+                              UserSettings(
+                                userId: u.correo,
+                                brightness: prev?.brightness,
+                                seedColor:
+                                    prev?.seedColor ?? colorToArgb(_seed),
+                                fontFamily: _fontFamily,
+                                followLocation:
+                                    prev?.followLocation ?? _followLocation,
+                                metaHydratationMl:
+                                    prev?.metaHydratationMl ??
+                                    computeDailyHydrationGoalMl(u),
+                              ),
                             );
-                            saveCurrentUser(updated);
                           }
                           _emit();
                         },
